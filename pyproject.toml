@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Rollers for quirq infra (qq): toolchain pin rolls and lockfile update config."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["qqsync @ git+https://github.com/quirq-ai/sync@8f624f4a7fe3abdab2c7b83376f1ae7772073fd4"]
 
 [project.optional-dependencies]
 test = ["pytest==9.1.1", "PyYAML==6.0.3"]

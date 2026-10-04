@@ -1,0 +1,63 @@
+# V0-ROL-01: the toolchain roller rotation. Reads the digests quirq-ai/toolchains promoted
+# (promoted.toml on its main) and opens or refreshes one roll PR per repo that rollers.toml lists,
+# editing infra/repo.toml only through qqsync. Roll PRs go through each repo's gate.
+# Auto-merge stays off (no --auto-merge) until quirq-ai/toolchains enforces review of promotions on
+# its main; until then a roll stops at an open PR. TODO(suraj): turn on --auto-merge after that fix.
+#
+# Roll PRs need the quirq infra bot (a GitHub App): PRs opened with this workflow's GITHUB_TOKEN would
+# trigger no workflows, so they would never be gated. Until the App's secrets exist, this runs as a
+# dry run and prints the diffs it would open.
+# TODO(suraj): create the quirq infra bot App (contents + pull requests write on the product repos)
+# and add its app id and private key as QQ_BOT_APP_ID and QQ_BOT_PRIVATE_KEY.
+# TODO(expert): have toolchains' promote workflow send repository_dispatch (toolchain-promoted) once
+# it can use the bot, so rolls start on promotion instead of on the weekly check.
+name: roll-toolchains
+on:
+  schedule:
+    - cron: "23 6 * * 1"   # weekly, rollers.toml cadence for the toolchains roller
+  workflow_dispatch:
+  repository_dispatch:
+    types: [toolchain-promoted]
+permissions:
+  contents: read
+concurrency:
+  group: roll-toolchains
+  cancel-in-progress: false
+jobs:
+  roll:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      HAS_BOT: ${{ secrets.QQ_BOT_APP_ID != '' }}   # secrets are not readable in a step's `if`
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - run: python -m pip install --quiet .
+      - name: check out infra-config at the pinned commit, and toolchains main
+        id: src
+        run: |
+          git init -q .qq/infra-config
+          git -C .qq/infra-config fetch -q --depth 1 https://github.com/quirq-ai/infra-config "$(cat infra-config.commit)"
+          git -C .qq/infra-config checkout -q FETCH_HEAD
+          git clone -q --depth 1 https://github.com/quirq-ai/toolchains .qq/toolchains
+          echo "toolchains=$(git -C .qq/toolchains rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: bot token
+        id: bot
+        if: env.HAS_BOT == 'true'
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.QQ_BOT_APP_ID }}
+          private-key: ${{ secrets.QQ_BOT_PRIVATE_KEY }}
+          owner: quirq-ai
+      - name: roll
+        env:
+          QQ_ROLLER_TOKEN: ${{ steps.bot.outputs.token }}
+        run: |
+          apply=
+          if [ -n "$QQ_ROLLER_TOKEN" ]; then apply=--apply
+          else echo "::warning::no quirq infra bot token (QQ_BOT_APP_ID); dry run only"; fi
+          qqroll rotation --infra-config .qq/infra-config --promoted .qq/toolchains/promoted.toml \
+            --promoted-from "quirq-ai/toolchains@${{ steps.src.outputs.toolchains }}" \
+            --rollers-commit "quirq-ai/rollers@$GITHUB_SHA" $apply

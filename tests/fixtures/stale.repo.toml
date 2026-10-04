@@ -1,0 +1,23 @@
+# Fixture: a manifest one toolchain promotion behind. The python pin is an older digest, the node
+# pin is current, and the deps pin is not a toolchain, so a roll changes exactly one line.
+schema = "quirq-repo/1"
+
+[qq]
+version = "0.1.0"
+
+[toolchains.python]
+version = "3.14.7"   # rollers keep this current
+platforms."linux-x86_64" = { source = "oci://ghcr.io/quirq-ai/toolchains/python", digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111" }
+
+[toolchains.node]
+version = "24.21.0"
+platforms."linux-x86_64" = { source = "oci://ghcr.io/quirq-ai/toolchains/node", digest = "sha256:a84e067c794c73ba5ecf72064bcb6940e67f51f3fce7803edc54040e8c69a173" }
+
+[deps.recipes]
+source = "https://github.com/quirq-ai/recipes"
+digest = "git:efc4ab5000000000000000000000000000000000"
+
+[[targets]]
+name = "server"
+kind = "python-service"
+srcs = ["server.py"]

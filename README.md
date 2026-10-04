@@ -42,6 +42,36 @@ that requires the gate check on `main` (V0-ORG-03). xo-space has no Python lockf
 rolls only move `requirements*.txt` floors, and may open no PR at all (`TODO(expert)` in
 `rollers.toml`); the done-when is shown on innernet first.
 
+## Toolchain pins: `qqroll roll` and `qqroll rotation` (V0-ROL-01)
+
+`quirq-ai/toolchains` records each promoted toolchain by digest in `promoted.toml` (V0-TCH-03). The
+roller moves every repo's `[toolchains.*]` pins in `infra/repo.toml` to those digests, editing the
+manifest only through `qqsync`, so a roll changes just the pin's `version` and `digest` and leaves
+every other byte alone.
+
+- Only toolchains a manifest already pins, from the source the promotion names, are moved; a roller
+  never adds a toolchain.
+- A roll stays inside the org-wide pin in infra-config `kinds.toml` (python `3.14`, node `24`). A new
+  minor or major means moving that pin first, which is a policy change for suraj.
+- `qqroll roll` edits one local manifest; it is the core that v1's `qq roll` reuses, so both make the
+  same diffs.
+- `qqroll rotation` reads `rollers.toml` (the `quirq-rollers` roller named `toolchains`), fetches each
+  listed repo's manifest from its default branch, and opens or refreshes one PR on the branch
+  `qq-roll/toolchains`. Repos with no manifest yet are skipped. GitHub calls sit behind
+  `qqroll.backends` (`github` now, `launchpad` later); repo slugs come from infra-config `repos.toml`.
+
+```sh
+qqroll roll --promoted ../toolchains/promoted.toml --manifest infra/repo.toml --infra-config ../infra-config
+qqroll rotation --infra-config ../infra-config --promoted ../toolchains/promoted.toml           # dry run: diffs only
+QQ_ROLLER_TOKEN=... qqroll rotation --infra-config ../infra-config --promoted ... --apply   # open roll PRs
+```
+
+`.github/workflows/roll-toolchains.yml` runs the rotation weekly (the `rollers.toml` cadence), on
+`repository_dispatch` (`toolchain-promoted`) and by hand. Roll PRs need the quirq infra bot (a GitHub
+App), because PRs opened with a workflow's `GITHUB_TOKEN` trigger no workflows; without its secrets the
+workflow is a dry run. Auto-merge (`--auto-merge`) stays off until `toolchains` enforces review of
+promotions on its `main`, so for now a roll stops at an open PR.
+
 ## Develop
 
 ```sh
@@ -54,6 +84,6 @@ python -m pytest -q
 | Item | What | PR | State |
 |---|---|---|---|
 | V0-ROL-02 | Lockfile updates (Dependabot config from `rollers.toml`) | #2 | in review |
-| V0-ROL-01 | Toolchain pin roller | | not started |
+| V0-ROL-01 | Toolchain pin roller | #3 | in review |
 
 Plan and every v0 item: `quirq-ai/infra-config`, `docs/plan.md` and `docs/v0.md`.

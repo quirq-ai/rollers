@@ -1,0 +1,122 @@
+"""The github backend: read a file from a repo and open or update a roll PR, over the REST API.
+
+Roll PRs must be opened with the quirq infra bot's token: PRs opened with a workflow's default
+GITHUB_TOKEN trigger no workflows, so they would never be gated.
+"""
+from __future__ import annotations
+
+import base64
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
+
+API = "https://api.github.com"
+
+
+class BackendError(Exception):
+    pass
+
+
+def _urllib_request(method: str, url: str, headers: dict, body: bytes | None) -> tuple[int, bytes]:
+    req = urllib.request.Request(url, data=body, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+
+class Backend:
+    def __init__(self, token: str | None = None, slugs: dict[str, str] | None = None,
+                 org: str = "quirq-ai", request=_urllib_request):
+        self.token = token
+        self.slugs = slugs or {}   # repo name -> owner/name, from infra-config repos.toml
+        self.org = org             # owner for repos repos.toml does not list
+        self._request = request
+
+    # --- transport -------------------------------------------------------------------------------
+
+    def _call(self, method: str, path: str, payload: dict | None = None, ok=(200, 201)) -> tuple[int, dict]:
+        headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
+                   "User-Agent": "quirq-rollers"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        body = None
+        if payload is not None:
+            body = json.dumps(payload).encode()
+            headers["Content-Type"] = "application/json"
+        status, raw = self._request(method, API + path, headers, body)
+        data = json.loads(raw) if raw else {}
+        if status not in ok:
+            message = data.get("message", "") if isinstance(data, dict) else ""
+            raise BackendError(f"{method} {path}: HTTP {status} {message}".rstrip())
+        return status, data
+
+    def _slug(self, repo: str) -> str:
+        return self.slugs.get(repo, f"{self.org}/{repo}")
+
+    def _repo(self, repo: str) -> str:
+        owner, name = self._slug(repo).split("/", 1)
+        return f"/repos/{urllib.parse.quote(owner)}/{urllib.parse.quote(name)}"
+
+    # --- reading ---------------------------------------------------------------------------------
+
+    def default_branch(self, repo: str) -> str:
+        return self._call("GET", self._repo(repo))[1]["default_branch"]
+
+    def read_file(self, repo: str, path: str, ref: str) -> str | None:
+        """The file's text at `ref`, or None if the repo has no such file."""
+        q = urllib.parse.quote(path)
+        status, data = self._call("GET", f"{self._repo(repo)}/contents/{q}?ref={urllib.parse.quote(ref)}",
+                                  ok=(200, 404))
+        if status == 404:
+            return None
+        if data.get("type") != "file" or data.get("encoding") != "base64":
+            raise BackendError(f"{repo}:{path} is not a regular file")
+        return base64.b64decode(data["content"]).decode("utf-8")
+
+    # --- writing ---------------------------------------------------------------------------------
+
+    def open_roll(self, repo: str, *, base: str, branch: str, path: str, text: str, title: str,
+                  body: str, auto_merge: bool = False) -> tuple[str, list[str]]:
+        """Commit `text` to `path` on `branch` (reset onto `base`), and open or update its PR.
+
+        Returns the PR URL and any warnings. The branch belongs to the roller and is force-moved, so
+        a stale roll is replaced rather than stacked on.
+        """
+        r = self._repo(repo)
+        warnings: list[str] = []
+        base_sha = self._call("GET", f"{r}/git/ref/heads/{urllib.parse.quote(base)}")[1]["object"]["sha"]
+        base_tree = self._call("GET", f"{r}/git/commits/{base_sha}")[1]["tree"]["sha"]
+        tree = self._call("POST", f"{r}/git/trees", {
+            "base_tree": base_tree,
+            "tree": [{"path": path, "mode": "100644", "type": "blob", "content": text}]})[1]["sha"]
+        commit = self._call("POST", f"{r}/git/commits",
+                            {"message": f"{title}\n\n{body}", "tree": tree, "parents": [base_sha]})[1]["sha"]
+        status, _ = self._call("PATCH", f"{r}/git/refs/heads/{urllib.parse.quote(branch)}",
+                               {"sha": commit, "force": True}, ok=(200, 404, 422))
+        if status != 200:
+            self._call("POST", f"{r}/git/refs", {"ref": f"refs/heads/{branch}", "sha": commit})
+        head = urllib.parse.quote(f"{self._slug(repo).split('/')[0]}:{branch}")
+        prs = self._call("GET", f"{r}/pulls?state=open&head={head}")[1]
+        if prs:
+            pr = self._call("PATCH", f"{r}/pulls/{prs[0]['number']}", {"title": title, "body": body})[1]
+        else:
+            pr = self._call("POST", f"{r}/pulls", {"title": title, "body": body, "head": branch, "base": base})[1]
+        if auto_merge:
+            warning = self._enable_auto_merge(pr["node_id"])
+            if warning:
+                warnings.append(f"{pr['html_url']}: auto-merge not enabled ({warning}); the roll waits for a human")
+        return pr["html_url"], warnings
+
+    def _enable_auto_merge(self, node_id: str) -> str | None:
+        """Turn on auto-merge, so GitHub lands the PR once the gate passes. A reason on failure."""
+        query = ("mutation($id: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, "
+                 "mergeMethod: SQUASH}) { clientMutationId } }")  # TODO(suraj): squash or merge (plan §10.3)
+        try:
+            _, data = self._call("POST", "/graphql", {"query": query, "variables": {"id": node_id}})
+        except BackendError as e:
+            return str(e)
+        errors = data.get("errors")
+        return "; ".join(e.get("message", "") for e in errors) if errors else None
