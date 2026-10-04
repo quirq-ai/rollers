@@ -18,6 +18,28 @@ Chromium's commits; here they do the same job for every repo quirq infra builds.
 Which repos get which roller, and how often, is config: `config/rollers.toml` in
 `quirq-ai/infra-config`, read with `qqcfg.load`.
 
+## Lockfile updates: `qqroll dependabot` (V0-ROL-02)
+
+Every repo that a `tool = "dependabot"` roller covers gets two generated files, kept under
+`generated/github/<repo>/` and copied into that repo as is:
+
+- `.github/dependabot.yml`: one update per roller, with its ecosystem, directory, cadence and open limit.
+- `.github/workflows/qq-roll-land.yml`: lands a clean Dependabot PR with no human. Clean means only
+  dependency files changed (requirements files for pip; `package.json` and `pnpm-lock.yaml` for npm),
+  only Dependabot pushed, and the bump is not a major version. The workflow turns on auto-merge, so
+  GitHub merges the PR only once the required checks pass: the roll goes through the same gate as any
+  change. Anything else has auto-merge turned off and waits for a human.
+
+```sh
+qqroll dependabot --infra-config ../infra-config --write   # regenerate generated/
+qqroll dependabot --infra-config ../infra-config           # check: exit 1 if stale (presubmit runs this)
+```
+
+The infra-config commit the files come from is pinned in `infra-config.commit` and recorded in each
+file's header. Admin steps the land workflow needs in each repo: "Allow auto-merge", and a ruleset
+that requires the gate check on `main` (V0-ORG-03). xo-space has no Python lockfile yet, so its pip
+rolls only move `requirements*.txt` (`TODO(expert)` in `rollers.toml`).
+
 ## Develop
 
 ```sh
@@ -29,7 +51,7 @@ python -m pytest -q
 
 | Item | What | PR | State |
 |---|---|---|---|
-| V0-ROL-02 | Lockfile updates (Dependabot config from `rollers.toml`) | | not started |
+| V0-ROL-02 | Lockfile updates (Dependabot config from `rollers.toml`) | #2 | in review |
 | V0-ROL-01 | Toolchain pin roller | | not started |
 
 Plan and every v0 item: `quirq-ai/infra-config`, `docs/plan.md` and `docs/v0.md`.
