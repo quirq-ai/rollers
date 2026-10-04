@@ -31,7 +31,7 @@ LINE_RULES = {
     # "name": "^1.2.3", in package.json dependency maps; removed and added lines alike
     "npm-manifest": re.compile(r'^\s*"(?P<key>(@[a-z0-9._-]+/)?[a-z0-9._-]+)":\s*"[\^~]?' + _VERSION + r'",?\s*$'),
     # name==1.2.3 or name>=1.2,<2 with an optional trailing comment; no options, URLs or markers
-    "pip-requirements": re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._,-]+\])?\s*" + _OP + r"\s*"
+    "pip-requirements": re.compile(r"^(?P<key>[A-Za-z0-9][A-Za-z0-9._-]*)(\[[A-Za-z0-9._,-]+\])?\s*" + _OP + r"\s*"
                                    + _VERSION + r"(\s*,\s*" + _OP + r"\s*" + _VERSION + r")*\s*(#.*)?$"),
 }
 # Added lockfile lines may not point anywhere but the registry.
@@ -107,9 +107,11 @@ def problems(env, files, commits, rules, allowed, head_rules):
             m = LINE_RULES[kinds[0]].match(line)
             if not m:
                 out.append(f"{shown}: not a version line: {json.dumps(line.strip())[:100]}")
-            elif kinds[0] == "npm-manifest":
+            elif kinds[0] == "pip-requirements":
+                keys[sign].append(re.sub(r"[-_.]+", "-", m["key"]).lower())  # PEP 503 name normalization
+            else:
                 keys[sign].append(m["key"])
-        # A bump rewrites existing entries in place: the same keys go out and come back in.
+        # A bump rewrites existing entries in place: the same names go out and come back in.
         if sorted(keys["+"]) != sorted(keys["-"]):
             out.append(f"{shown}: adds or removes entries, not only versions")
 

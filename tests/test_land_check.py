@@ -97,6 +97,22 @@ def test_requirements_keep_comments_and_extras():
     assert check(env={"CHANGED": "1"}, files=files, allowed=ALLOWED_PIP) == []
 
 
+@pytest.mark.parametrize("patch", [
+    "@@ -1 +1,2 @@\n-requests==2.32.4\n+requests==2.32.5\n+evil==1.0.0\n",  # R-1: a new requirement
+    "@@ -1 +1 @@\n-requests==2.32.4\n+evil==2.32.5\n",
+    "@@ -0,0 +1 @@\n+evil==1.0.0\n",
+])
+def test_requirements_entries_only_change_version(patch):
+    files = [npm_file("requirements.txt", patch)]
+    assert any("adds or removes entries" in p for p in check(env={"CHANGED": "1"}, files=files, allowed=ALLOWED_PIP))
+
+
+def test_requirements_names_compare_normalized():
+    patch = "@@ -1 +1 @@\n-Typing_Extensions==4.14.0\n+typing-extensions==4.14.1\n"
+    files = [npm_file("requirements.txt", patch)]
+    assert check(env={"CHANGED": "1"}, files=files, allowed=ALLOWED_PIP) == []
+
+
 # --- S-3: how big the bump is -----------------------------------------------------------------
 
 @pytest.mark.parametrize("env, why", [

@@ -1,4 +1,4 @@
-# What roll-toolchains.yml installs before the quirq infra bot token exists, by hash, with --no-deps:
+# What roll-toolchains.yml installs before the quirq rollers App token exists, by hash, with --no-deps:
 # qqsync's dependencies (pinned in quirq-ai/sync pyproject.toml) and the build backend for
 # --no-build-isolation installs of qqsync and qqroll.
 # Regenerate: printf "jsonschema==4.26.0\ntomlkit==0.15.1\nsetuptools>=80\n" > roll.in &&

@@ -101,7 +101,7 @@ LAND_WORKFLOW = """\
 # does not turn them on), "Allow auto-merge", a ruleset that requires the gate on main (V0-ORG-03),
 # and a ruleset restricting updates and force pushes to dependabot/** with only Dependabot exempt.
 # TODO(expert): merges made with GITHUB_TOKEN do not trigger push workflows (post-submit); switch to
-# the quirq infra bot's token once it exists. Dependabot PRs only see Dependabot secrets.
+# the quirq rollers App's token once it exists. Dependabot PRs only see Dependabot secrets.
 # TODO(expert): once owner review is required (V0-GAT-03), decide with gate how dependency-roll skips it.
 name: qq-roll-land
 on:

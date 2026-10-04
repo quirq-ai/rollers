@@ -14,9 +14,9 @@
 # does not turn them on), "Allow auto-merge", a ruleset that requires the gate on main (V0-ORG-03),
 # and a ruleset restricting updates and force pushes to dependabot/** with only Dependabot exempt.
 # TODO(expert): merges made with GITHUB_TOKEN do not trigger push workflows (post-submit); switch to
-# the quirq infra bot's token once it exists. Dependabot PRs only see Dependabot secrets.
+# the quirq rollers App's token once it exists. Dependabot PRs only see Dependabot secrets.
 # TODO(expert): once owner review is required (V0-GAT-03), decide with gate how dependency-roll skips it.
-# qq-digest: sha256:1340b7e553e65fbfb0813494d9786443def1c3008545367e4b73c74acb34be55
+# qq-digest: sha256:11fa99e5246900a2ddbf0177339ef8dc616437912618e5c27c50bb8828351380
 name: qq-roll-land
 on:
   pull_request:
@@ -90,7 +90,7 @@ jobs:
               # "name": "^1.2.3", in package.json dependency maps; removed and added lines alike
               "npm-manifest": re.compile(r'^\s*"(?P<key>(@[a-z0-9._-]+/)?[a-z0-9._-]+)":\s*"[\^~]?' + _VERSION + r'",?\s*$'),
               # name==1.2.3 or name>=1.2,<2 with an optional trailing comment; no options, URLs or markers
-              "pip-requirements": re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._,-]+\])?\s*" + _OP + r"\s*"
+              "pip-requirements": re.compile(r"^(?P<key>[A-Za-z0-9][A-Za-z0-9._-]*)(\[[A-Za-z0-9._,-]+\])?\s*" + _OP + r"\s*"
                                              + _VERSION + r"(\s*,\s*" + _OP + r"\s*" + _VERSION + r")*\s*(#.*)?$"),
           }
           # Added lockfile lines may not point anywhere but the registry.
@@ -166,9 +166,11 @@ jobs:
                       m = LINE_RULES[kinds[0]].match(line)
                       if not m:
                           out.append(f"{shown}: not a version line: {json.dumps(line.strip())[:100]}")
-                      elif kinds[0] == "npm-manifest":
+                      elif kinds[0] == "pip-requirements":
+                          keys[sign].append(re.sub(r"[-_.]+", "-", m["key"]).lower())  # PEP 503 name normalization
+                      else:
                           keys[sign].append(m["key"])
-                  # A bump rewrites existing entries in place: the same keys go out and come back in.
+                  # A bump rewrites existing entries in place: the same names go out and come back in.
                   if sorted(keys["+"]) != sorted(keys["-"]):
                       out.append(f"{shown}: adds or removes entries, not only versions")
 
