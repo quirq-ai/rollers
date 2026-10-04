@@ -12,3 +12,4 @@ PIP_PATCH = "@@ -1 +1 @@\n-requests>=2.32.0\n+requests>=2.33.1\n"
 
 def npm_file(name="package.json", patch=NPM_PATCH, **kw):
     return {"filename": name, "status": "modified", "patch": patch, **kw}
+HEAD_RULES = [{"type": "update", "parameters": {}}, {"type": "non_fast_forward"}]

@@ -3,7 +3,8 @@
 This file's source is embedded as is in the generated workflow and run with the runner's python3,
 so it uses only the standard library and reads everything from the environment:
 
-    QQ_DIR        directory holding files.json, commits.json and rules.json (`gh api --paginate --slurp`)
+    QQ_DIR        directory holding files.json, commits.json, rules.json (base branch) and head_rules.json
+                  (head branch), each from `gh api --paginate --slurp`
     QQ_ALLOWED    JSON list of [glob, kind]: the files a roll may modify and how their lines are checked
     SENDER, TRIGGER, CHANGED, UPDATE_TYPE, PREV_VERSION, DEP_NAMES, GITHUB_OUTPUT
 
@@ -60,7 +61,7 @@ def changed_lines(patch):
             yield line[0], line[1:]
 
 
-def problems(env, files, commits, rules, allowed):
+def problems(env, files, commits, rules, allowed, head_rules):
     out = []
     if env.get("SENDER") != DEPENDABOT or env.get("TRIGGER") != DEPENDABOT:
         out.append(f"triggered by {env.get('SENDER')!r}/{env.get('TRIGGER')!r}, not Dependabot")
@@ -122,18 +123,31 @@ def problems(env, files, commits, rules, allowed):
     prev = env.get("PREV_VERSION", "").strip().lstrip("vV")
     if update == "version-update:semver-minor" and (not prev or prev.startswith("0.")):
         out.append(f"minor bump from {env.get('PREV_VERSION')!r}; 0.x minors can break, so a human lands it")
-    if update == "version-update:semver-patch" and (not prev or prev.startswith("0.0.")):
+    if update == "version-update:semver-patch" and (not prev or prev == "0.0" or prev.startswith("0.0.")):
         out.append(f"patch bump from {env.get('PREV_VERSION')!r}; 0.0.x patches can break, so a human lands it")
 
     # Auto-merge waits for required checks only if there are some that a workflow cannot fake: a
     # required check bound to an app other than GitHub Actions, or a required workflow (ruleset).
     bound = [check for r in rules if r.get("type") == "required_status_checks"
              for check in (r.get("parameters") or {}).get("required_status_checks", [])
-             if check.get("integration_id") not in (None, GITHUB_ACTIONS_APP)]
-    workflows = [r for r in rules if r.get("type") == "workflows"]
+             if type(check.get("integration_id")) is int and check["integration_id"] > 0
+             and check["integration_id"] != GITHUB_ACTIONS_APP]
+    # A required workflow counts only if every workflow in the rule is pinned to a commit, so nobody with
+    # push access can edit what it runs.
+    workflows = [r for r in rules if r.get("type") == "workflows"
+                 and (r.get("parameters") or {}).get("workflows")
+                 and all(isinstance(w, dict) and re.fullmatch(r"[0-9a-f]{40}", str(w.get("sha", "")))
+                         for w in r["parameters"]["workflows"])]
     if not bound and not workflows:
-        out.append("no required workflow, and no required check bound to an app other than GitHub Actions, "
-                   "on the base branch; any workflow could fake the gate, so a human lands it")
+        out.append("no required workflow pinned by sha, and no required check bound to an app other than "
+                   "GitHub Actions, on the base branch; any workflow could fake the gate, so a human lands it")
+
+    # Auto-merge stays on after this run, so nobody but Dependabot may push to the PR branch afterwards.
+    # (Who is exempt from these rules is not readable here; that part is on the admin.)
+    head_types = {r.get("type") for r in head_rules}
+    if not {"update", "non_fast_forward"} <= head_types:
+        out.append(f"the PR branch has no update and non_fast_forward rules (has {sorted(map(str, head_types))}); "
+                   "anyone with push access could swap its commit after this check, so a human lands it")
     return out
 
 
@@ -141,7 +155,7 @@ def main():
     env = os.environ
     d = env["QQ_DIR"]
     found = problems(env, pages(f"{d}/files.json"), pages(f"{d}/commits.json"), pages(f"{d}/rules.json"),
-                     json.loads(env["QQ_ALLOWED"]))
+                     json.loads(env["QQ_ALLOWED"]), pages(f"{d}/head_rules.json"))
     for p in found:
         print(f"not clean: {p}")
     if not found:

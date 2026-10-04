@@ -91,12 +91,14 @@ LAND_WORKFLOW = """\
 # below) requires all of: Dependabot opened and last triggered the PR; exactly one commit, made by
 # GitHub for Dependabot; only modified dependency files whose changed lines are version lines (no
 # scripts, index options, URLs or non-registry resolutions); a patch or minor bump of one dependency,
-# where a 0.x minor counts as major; and a required status check bound to its app on the base branch.
+# where a 0.x minor counts as major; a gate on the base branch no workflow can fake (a required
+# workflow pinned by sha, or a required check bound to an app other than GitHub Actions); and rules on
+# the head branch that stop pushes to it after this check (update and non_fast_forward).
 # Auto-merge then lands it only after the required checks pass. Anything else, including any failed
 # step, turns auto-merge off and leaves the PR to a human.
 # Needs, set by an admin: Dependabot version updates on (xo-space is a fork, so the config file alone
-# does not turn them on), "Allow auto-merge", and a ruleset that requires the gate check on main,
-# bound to its app (V0-ORG-03).
+# does not turn them on), "Allow auto-merge", a ruleset that requires the gate on main (V0-ORG-03),
+# and a ruleset restricting updates and force pushes to dependabot/** with only Dependabot exempt.
 # TODO(expert): merges made with GITHUB_TOKEN do not trigger push workflows (post-submit); switch to
 # the quirq infra bot's token once it exists. Dependabot PRs only see Dependabot secrets.
 # TODO(expert): once owner review is required (V0-GAT-03), decide with gate how dependency-roll skips it.
@@ -124,6 +126,7 @@ jobs:
           GH_TOKEN: ${{{{ github.token }}}}
           PR: ${{{{ github.event.pull_request.number }}}}
           BASE: ${{{{ github.event.pull_request.base.ref }}}}
+          HEAD_REF: ${{{{ github.event.pull_request.head.ref }}}}
           SENDER: ${{{{ github.event.sender.login }}}}
           TRIGGER: ${{{{ github.triggering_actor }}}}
           CHANGED: ${{{{ github.event.pull_request.changed_files }}}}
@@ -136,6 +139,8 @@ jobs:
           gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls/$PR/files" > "$QQ_DIR/files.json"
           gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls/$PR/commits" > "$QQ_DIR/commits.json"
           gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/rules/branches/$BASE" > "$QQ_DIR/rules.json"
+          head=$(jq -rn --arg b "$HEAD_REF" '$b|@uri')
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/rules/branches/$head" > "$QQ_DIR/head_rules.json"
           python3 - <<'QQ_LAND_CHECK'
 @@LAND_CHECK@@
           QQ_LAND_CHECK

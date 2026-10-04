@@ -5,12 +5,14 @@
 # below) requires all of: Dependabot opened and last triggered the PR; exactly one commit, made by
 # GitHub for Dependabot; only modified dependency files whose changed lines are version lines (no
 # scripts, index options, URLs or non-registry resolutions); a patch or minor bump of one dependency,
-# where a 0.x minor counts as major; and a required status check bound to its app on the base branch.
+# where a 0.x minor counts as major; a gate on the base branch no workflow can fake (a required
+# workflow pinned by sha, or a required check bound to an app other than GitHub Actions); and rules on
+# the head branch that stop pushes to it after this check (update and non_fast_forward).
 # Auto-merge then lands it only after the required checks pass. Anything else, including any failed
 # step, turns auto-merge off and leaves the PR to a human.
 # Needs, set by an admin: Dependabot version updates on (xo-space is a fork, so the config file alone
-# does not turn them on), "Allow auto-merge", and a ruleset that requires the gate check on main,
-# bound to its app (V0-ORG-03).
+# does not turn them on), "Allow auto-merge", a ruleset that requires the gate on main (V0-ORG-03),
+# and a ruleset restricting updates and force pushes to dependabot/** with only Dependabot exempt.
 # TODO(expert): merges made with GITHUB_TOKEN do not trigger push workflows (post-submit); switch to
 # the quirq infra bot's token once it exists. Dependabot PRs only see Dependabot secrets.
 # TODO(expert): once owner review is required (V0-GAT-03), decide with gate how dependency-roll skips it.
@@ -38,6 +40,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           BASE: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
           SENDER: ${{ github.event.sender.login }}
           TRIGGER: ${{ github.triggering_actor }}
           CHANGED: ${{ github.event.pull_request.changed_files }}
@@ -50,13 +53,16 @@ jobs:
           gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls/$PR/files" > "$QQ_DIR/files.json"
           gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls/$PR/commits" > "$QQ_DIR/commits.json"
           gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/rules/branches/$BASE" > "$QQ_DIR/rules.json"
+          head=$(jq -rn --arg b "$HEAD_REF" '$b|@uri')
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/rules/branches/$head" > "$QQ_DIR/head_rules.json"
           python3 - <<'QQ_LAND_CHECK'
           """The check qq-roll-land runs on a Dependabot PR before it may land with no human (V0-ROL-02, D4).
 
           This file's source is embedded as is in the generated workflow and run with the runner's python3,
           so it uses only the standard library and reads everything from the environment:
 
-              QQ_DIR        directory holding files.json, commits.json and rules.json (`gh api --paginate --slurp`)
+              QQ_DIR        directory holding files.json, commits.json, rules.json (base branch) and head_rules.json
+                            (head branch), each from `gh api --paginate --slurp`
               QQ_ALLOWED    JSON list of [glob, kind]: the files a roll may modify and how their lines are checked
               SENDER, TRIGGER, CHANGED, UPDATE_TYPE, PREV_VERSION, DEP_NAMES, GITHUB_OUTPUT
 
@@ -113,7 +119,7 @@ jobs:
                       yield line[0], line[1:]
 
 
-          def problems(env, files, commits, rules, allowed):
+          def problems(env, files, commits, rules, allowed, head_rules):
               out = []
               if env.get("SENDER") != DEPENDABOT or env.get("TRIGGER") != DEPENDABOT:
                   out.append(f"triggered by {env.get('SENDER')!r}/{env.get('TRIGGER')!r}, not Dependabot")
@@ -175,18 +181,31 @@ jobs:
               prev = env.get("PREV_VERSION", "").strip().lstrip("vV")
               if update == "version-update:semver-minor" and (not prev or prev.startswith("0.")):
                   out.append(f"minor bump from {env.get('PREV_VERSION')!r}; 0.x minors can break, so a human lands it")
-              if update == "version-update:semver-patch" and (not prev or prev.startswith("0.0.")):
+              if update == "version-update:semver-patch" and (not prev or prev == "0.0" or prev.startswith("0.0.")):
                   out.append(f"patch bump from {env.get('PREV_VERSION')!r}; 0.0.x patches can break, so a human lands it")
 
               # Auto-merge waits for required checks only if there are some that a workflow cannot fake: a
               # required check bound to an app other than GitHub Actions, or a required workflow (ruleset).
               bound = [check for r in rules if r.get("type") == "required_status_checks"
                        for check in (r.get("parameters") or {}).get("required_status_checks", [])
-                       if check.get("integration_id") not in (None, GITHUB_ACTIONS_APP)]
-              workflows = [r for r in rules if r.get("type") == "workflows"]
+                       if type(check.get("integration_id")) is int and check["integration_id"] > 0
+                       and check["integration_id"] != GITHUB_ACTIONS_APP]
+              # A required workflow counts only if every workflow in the rule is pinned to a commit, so nobody with
+              # push access can edit what it runs.
+              workflows = [r for r in rules if r.get("type") == "workflows"
+                           and (r.get("parameters") or {}).get("workflows")
+                           and all(isinstance(w, dict) and re.fullmatch(r"[0-9a-f]{40}", str(w.get("sha", "")))
+                                   for w in r["parameters"]["workflows"])]
               if not bound and not workflows:
-                  out.append("no required workflow, and no required check bound to an app other than GitHub Actions, "
-                             "on the base branch; any workflow could fake the gate, so a human lands it")
+                  out.append("no required workflow pinned by sha, and no required check bound to an app other than "
+                             "GitHub Actions, on the base branch; any workflow could fake the gate, so a human lands it")
+
+              # Auto-merge stays on after this run, so nobody but Dependabot may push to the PR branch afterwards.
+              # (Who is exempt from these rules is not readable here; that part is on the admin.)
+              head_types = {r.get("type") for r in head_rules}
+              if not {"update", "non_fast_forward"} <= head_types:
+                  out.append(f"the PR branch has no update and non_fast_forward rules (has {sorted(map(str, head_types))}); "
+                             "anyone with push access could swap its commit after this check, so a human lands it")
               return out
 
 
@@ -194,7 +213,7 @@ jobs:
               env = os.environ
               d = env["QQ_DIR"]
               found = problems(env, pages(f"{d}/files.json"), pages(f"{d}/commits.json"), pages(f"{d}/rules.json"),
-                               json.loads(env["QQ_ALLOWED"]))
+                               json.loads(env["QQ_ALLOWED"]), pages(f"{d}/head_rules.json"))
               for p in found:
                   print(f"not clean: {p}")
               if not found:

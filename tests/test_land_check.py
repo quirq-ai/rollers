@@ -3,7 +3,7 @@ import json
 import pytest
 
 from qqroll import land_check
-from tests_support import CLEAN_COMMIT, LOCK_PATCH, PIP_PATCH, RULES, npm_file
+from tests_support import CLEAN_COMMIT, HEAD_RULES, LOCK_PATCH, PIP_PATCH, RULES, npm_file
 
 ALLOWED_NPM = [["package.json", "npm-manifest"], ["pnpm-lock.yaml", "npm-lock"]]
 ALLOWED_PIP = [["requirements*.txt", "pip-requirements"]]
@@ -12,10 +12,10 @@ ENV = {"SENDER": "dependabot[bot]", "TRIGGER": "dependabot[bot]", "CHANGED": "2"
 FILES = [npm_file(), npm_file("pnpm-lock.yaml", LOCK_PATCH)]
 
 
-def check(env=None, files=None, commits=None, rules=None, allowed=None):
+def check(env=None, files=None, commits=None, rules=None, allowed=None, head_rules=None):
     return land_check.problems({**ENV, **(env or {})}, FILES if files is None else files,
                                [CLEAN_COMMIT] if commits is None else commits, RULES if rules is None else rules,
-                               allowed or ALLOWED_NPM)
+                               allowed or ALLOWED_NPM, HEAD_RULES if head_rules is None else head_rules)
 
 
 def test_a_clean_roll_is_clean():
@@ -106,6 +106,7 @@ def test_requirements_keep_comments_and_extras():
     ({"UPDATE_TYPE": "version-update:semver-minor", "PREV_VERSION": "v0.5.1"}, "0.x minors can break"),
     ({"UPDATE_TYPE": "version-update:semver-minor", "PREV_VERSION": ""}, "0.x minors can break"),
     ({"UPDATE_TYPE": "version-update:semver-patch", "PREV_VERSION": "0.0.3"}, "0.0.x patches can break"),
+    ({"UPDATE_TYPE": "version-update:semver-patch", "PREV_VERSION": "0.0"}, "0.0.x patches can break"),
     ({"UPDATE_TYPE": "version-update:semver-patch", "PREV_VERSION": ""}, "0.0.x patches can break"),
     ({"DEP_NAMES": "next, react"}, "several dependencies"),
 ])
@@ -143,19 +144,29 @@ def test_manifest_entries_only_change_version(patch):
     # bound to GitHub Actions: any workflow's GITHUB_TOKEN can create that check run
     [{"type": "required_status_checks",
       "parameters": {"required_status_checks": [{"context": "tests", "integration_id": 15368}]}}],
+    [{"type": "required_status_checks",
+      "parameters": {"required_status_checks": [{"context": "tests", "integration_id": 0}]}}],
+    [{"type": "workflows", "parameters": {"workflows": []}}],
+    [{"type": "workflows", "parameters": {"workflows": [{"path": ".github/workflows/gate.yml", "ref": "main"}]}}],
 ])
 def test_no_unforgeable_gate_is_not_clean(rules):
     assert any("any workflow could fake the gate" in p for p in check(rules=rules))
 
 
 def test_a_required_workflow_gates_it():
-    assert check(rules=[{"type": "workflows", "parameters": {"workflows": [{"path": ".github/workflows/gate.yml"}]}}]) == []
+    pinned = {"path": ".github/workflows/gate.yml", "repository_id": 1, "sha": "a" * 40}
+    assert check(rules=[{"type": "workflows", "parameters": {"workflows": [pinned]}}]) == []
+
+
+@pytest.mark.parametrize("head_rules", [[], [{"type": "update"}], [{"type": "non_fast_forward"}]])
+def test_writable_pr_branch_is_not_clean(head_rules):
+    assert any("could swap its commit" in p for p in check(head_rules=head_rules))
 
 
 # --- main -------------------------------------------------------------------------------------
 
 def test_main_writes_the_output_and_fails_closed_on_bad_data(tmp_path, monkeypatch, capsys):
-    for name, data in [("files", [FILES]), ("commits", [[CLEAN_COMMIT]]), ("rules", [RULES])]:
+    for name, data in [("files", [FILES]), ("commits", [[CLEAN_COMMIT]]), ("rules", [RULES]), ("head_rules", [HEAD_RULES])]:
         (tmp_path / f"{name}.json").write_text(json.dumps(data))
     out = tmp_path / "out"
     env = {**ENV, "QQ_DIR": str(tmp_path), "QQ_ALLOWED": json.dumps(ALLOWED_NPM), "GITHUB_OUTPUT": str(out)}

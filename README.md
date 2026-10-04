@@ -37,9 +37,11 @@ Every repo that a `tool = "dependabot"` roller covers gets two generated files, 
     markers), and registry-only lockfile entries.
   - It bumps one dependency by a patch or minor version. Below 1.0 a minor bump counts as major, below
     0.1 a patch bump does too, and an unknown previous version counts as 0.x.
-  - The base branch has a gate a workflow cannot fake: a required workflow (ruleset), or a required
-    check bound to an app other than GitHub Actions. Any workflow's `GITHUB_TOKEN` can create a
-    check run owned by GitHub Actions, so a check bound to it does not count.
+  - The base branch has a gate a workflow cannot fake: a required workflow (ruleset) pinned by sha, or
+    a required check bound to an app other than GitHub Actions. Any workflow's `GITHUB_TOKEN` can
+    create a check run owned by GitHub Actions, so a check bound to it does not count.
+  - The PR branch has `update` and `non_fast_forward` rules, so nobody can swap its commit after the
+    check while auto-merge is on.
 
   The workflow then turns on auto-merge, so GitHub merges the PR only once the required checks pass.
   Anything else, including any failed step, turns auto-merge off and leaves the PR to a human.
@@ -56,8 +58,8 @@ that requires the gate on `main` as a required workflow or as a check bound to a
 (V0-ORG-03), and a ruleset that restricts creating, updating and force-pushing `dependabot/**`
 branches so only Dependabot writes them. Auto-merge stays on after this run, and GitHub turns it off
 only for pushes by people without write access, so without that branch rule someone with write access
-could swap the PR's commit after the check. The land check cannot read rulesets' bypass lists, so it
-does not verify that last rule; it is on the admin. xo-space has no Python lockfile yet, so its pip
+could swap the PR's commit after the check. The land check confirms that rule applies to the PR branch, but it
+cannot read rulesets' bypass lists, so keeping Dependabot the only exempt actor is on the admin. xo-space has no Python lockfile yet, so its pip
 rolls only move `requirements*.txt` floors, and may open no PR at all (`TODO(expert)` in
 `rollers.toml`); the done-when is shown on innernet first.
 
