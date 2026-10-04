@@ -102,6 +102,20 @@ def test_requirements_comments_cannot_swallow_lines(line):
     assert any("not a version line" in p for p in check(env=PIP_ENV, files=files, allowed=ALLOWED_PIP))
 
 
+@pytest.mark.parametrize("sep", ["\x0c", "\r", "\x0b", "\x1c", "\x85", "\u2028"])
+@pytest.mark.parametrize("added", ["requests==2.32.5{sep}evil==1.0", "requests==2.32.5 # x{sep}evil==1.0"])
+def test_a_changed_line_cannot_hide_a_second_line(sep, added):
+    """pip splits requirement files with str.splitlines, so these would add evil==1.0."""
+    patch = f"@@ -1 +1 @@\n-requests==2.32.4\n+{added.format(sep=sep)}\n"
+    files = [npm_file("requirements.txt", patch)]
+    assert any("control or line-separator" in p for p in check(env=PIP_ENV, files=files, allowed=ALLOWED_PIP))
+
+
+def test_crlf_patches_still_work():
+    patch = PIP_PATCH.replace("\n", "\r\n")
+    assert check(env=PIP_ENV, files=[npm_file("requirements.txt", patch)], allowed=ALLOWED_PIP) == []
+
+
 @pytest.mark.parametrize("option", ["--index-url https://pypi.example/simple", "--require-hashes", "--constraint c.txt"])
 def test_a_removed_option_line_is_checked(option):
     """A removed line starting with -- shows as ---... in the patch; it is content, not a file header."""

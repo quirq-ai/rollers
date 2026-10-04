@@ -35,6 +35,9 @@ LINE_RULES = {
     "pip-requirements": re.compile(r"^(?P<key>[A-Za-z0-9][A-Za-z0-9._-]*)(\[[A-Za-z0-9._,-]+\])?\s*" + _OP + r"\s*"
                                    + _VERSION + r"(\s*,\s*" + _OP + r"\s*" + _VERSION + r")*(\s+#[^\\]*)?\s*$"),
 }
+# Characters that are not printable on one line: C0 controls but tab, DEL, C1 controls and the Unicode
+# line and paragraph separators.
+CONTROL = re.compile("[\x00-\x08\x0a-\x1f\x7f-\x9f\u2028\u2029]")
 # A version where one starts: right after an operator, a range prefix or the opening quote.
 _PLACED_VERSION = re.compile(r'(?<=[=<>~!^"])\s*' + _VERSION)
 # Added lockfile lines may not point anywhere but the registry.
@@ -60,7 +63,10 @@ def changed_lines(patch):
     """The +/- lines of a patch. File headers can only come before the first hunk: after it, a line
     starting with --- is a removed line that starts with --, such as a pip --index-url option."""
     in_hunk = False
-    for line in patch.splitlines():
+    # Split on \n alone, as GitHub does: str.splitlines also splits on \r, \f, \x85 and more, which
+    # would turn the rest of a changed line into an unchecked context line.
+    for line in patch.split("\n"):
+        line = line.removesuffix("\r")
         if line.startswith("@@"):
             in_hunk = True
         elif not in_hunk and line.startswith(("+++", "---")):
@@ -123,6 +129,11 @@ def problems(env, files, commits, rules, allowed, head_rules):
             continue
         keys = {"+": [], "-": []}
         for sign, line in changed_lines(patch):
+            # pip and other readers split lines on these too, so one could hide a second line in this one.
+            if CONTROL.search(line):
+                out.append(f"{shown}: control or line-separator character in a changed line: "
+                           f"{json.dumps(line.strip())[:100]}")
+                continue
             if kinds[0] == "npm-lock":
                 if sign == "+" and LOCK_FORBIDDEN.search(line):
                     out.append(f"{shown}: non-registry resolution: {json.dumps(line.strip())[:100]}")
