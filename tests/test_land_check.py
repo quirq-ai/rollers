@@ -103,6 +103,10 @@ def test_requirements_keep_comments_and_extras():
     ({"UPDATE_TYPE": "version-update:semver-major"}, "only patch and minor"),
     ({"UPDATE_TYPE": ""}, "only patch and minor"),
     ({"UPDATE_TYPE": "version-update:semver-minor", "PREV_VERSION": "0.5.1"}, "0.x minors can break"),
+    ({"UPDATE_TYPE": "version-update:semver-minor", "PREV_VERSION": "v0.5.1"}, "0.x minors can break"),
+    ({"UPDATE_TYPE": "version-update:semver-minor", "PREV_VERSION": ""}, "0.x minors can break"),
+    ({"UPDATE_TYPE": "version-update:semver-patch", "PREV_VERSION": "0.0.3"}, "0.0.x patches can break"),
+    ({"UPDATE_TYPE": "version-update:semver-patch", "PREV_VERSION": ""}, "0.0.x patches can break"),
     ({"DEP_NAMES": "next, react"}, "several dependencies"),
 ])
 def test_risky_bumps_go_to_a_human(env, why):
@@ -111,6 +115,24 @@ def test_risky_bumps_go_to_a_human(env, why):
 
 def test_a_minor_bump_past_1_0_is_clean():
     assert check(env={"UPDATE_TYPE": "version-update:semver-minor", "PREV_VERSION": "16.2.4"}) == []
+    assert check(env={"UPDATE_TYPE": "version-update:semver-patch", "PREV_VERSION": "0.5.1"}) == []
+
+
+@pytest.mark.parametrize("line", [
+    "+    resolution: {commit: abc, repo: git@github.com:a/b.git, type: git}",
+    "+    resolution: {directory: ../x, type: directory}",
+])
+def test_lockfile_non_registry_forms(line):
+    files = [npm_file(), npm_file("pnpm-lock.yaml", "@@ -1 +1 @@\n-  x\n" + line + "\n")]
+    assert any("non-registry resolution" in p for p in check(env={"CHANGED": "2"}, files=files))
+
+
+@pytest.mark.parametrize("patch", [
+    '@@ -1,2 +1,3 @@\n-    "next": "^16.3.7",\n+    "next": "^16.3.8",\n+    "evil": "1.0.0",\n',
+    '@@ -1 +1 @@\n-    "next": "^16.3.7",\n+    "test": "0",\n',
+])
+def test_manifest_entries_only_change_version(patch):
+    assert any("adds or removes entries" in p for p in check(files=[npm_file(patch=patch)]))
 
 
 # --- S-4: something must gate it --------------------------------------------------------------
@@ -118,9 +140,16 @@ def test_a_minor_bump_past_1_0_is_clean():
 @pytest.mark.parametrize("rules", [
     [], [{"type": "pull_request", "parameters": {}}],
     [{"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "tests"}]}}],
+    # bound to GitHub Actions: any workflow's GITHUB_TOKEN can create that check run
+    [{"type": "required_status_checks",
+      "parameters": {"required_status_checks": [{"context": "tests", "integration_id": 15368}]}}],
 ])
-def test_no_bound_required_check_is_not_clean(rules):
-    assert any("nothing would gate the roll" in p for p in check(rules=rules))
+def test_no_unforgeable_gate_is_not_clean(rules):
+    assert any("any workflow could fake the gate" in p for p in check(rules=rules))
+
+
+def test_a_required_workflow_gates_it():
+    assert check(rules=[{"type": "workflows", "parameters": {"workflows": [{"path": ".github/workflows/gate.yml"}]}}]) == []
 
 
 # --- main -------------------------------------------------------------------------------------

@@ -32,10 +32,14 @@ Every repo that a `tool = "dependabot"` roller covers gets two generated files, 
   - Every changed file is *modified* (no adds, deletes or renames), at most 20, and is a dependency
     file at the roller's directory: `requirements*.txt` for pip, `package.json` and `pnpm-lock.yaml`
     for npm.
-  - Every changed line is a version: dependency version lines in `package.json`, plain pins in
-    requirements files (no index options, URLs or markers), and registry-only lockfile entries.
-  - It bumps one dependency by a patch or minor version; a minor bump from 0.x counts as major.
-  - The base branch has a required status check bound to its app, so something gates the roll.
+  - Every changed line is a version: existing dependency entries in `package.json` rewritten in place
+    (no entries added or removed), plain pins in requirements files (no index options, URLs or
+    markers), and registry-only lockfile entries.
+  - It bumps one dependency by a patch or minor version. Below 1.0 a minor bump counts as major, below
+    0.1 a patch bump does too, and an unknown previous version counts as 0.x.
+  - The base branch has a gate a workflow cannot fake: a required workflow (ruleset), or a required
+    check bound to an app other than GitHub Actions. Any workflow's `GITHUB_TOKEN` can create a
+    check run owned by GitHub Actions, so a check bound to it does not count.
 
   The workflow then turns on auto-merge, so GitHub merges the PR only once the required checks pass.
   Anything else, including any failed step, turns auto-merge off and leaves the PR to a human.
@@ -47,8 +51,13 @@ qqroll dependabot --infra-config ../infra-config           # check: exit 1 if st
 
 The infra-config commit the files come from is pinned in `infra-config.commit` and recorded in each
 file's header. Admin steps the land workflow needs in each repo: Dependabot version updates turned on
-(xo-space is a fork, so the config file alone doesn't enable them), "Allow auto-merge", and a ruleset
-that requires the gate check on `main`, bound to the app that runs it (V0-ORG-03). xo-space has no Python lockfile yet, so its pip
+(xo-space is a fork, so the config file alone doesn't enable them), "Allow auto-merge", a ruleset
+that requires the gate on `main` as a required workflow or as a check bound to a non-Actions app
+(V0-ORG-03), and a ruleset that restricts creating, updating and force-pushing `dependabot/**`
+branches so only Dependabot writes them. Auto-merge stays on after this run, and GitHub turns it off
+only for pushes by people without write access, so without that branch rule someone with write access
+could swap the PR's commit after the check. The land check cannot read rulesets' bypass lists, so it
+does not verify that last rule; it is on the admin. xo-space has no Python lockfile yet, so its pip
 rolls only move `requirements*.txt` floors, and may open no PR at all (`TODO(expert)` in
 `rollers.toml`); the done-when is shown on innernet first.
 

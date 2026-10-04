@@ -71,6 +71,9 @@ jobs:
 
           DEPENDABOT = "dependabot[bot]"
           MAX_FILES = 20
+          # Check runs made with any workflow's GITHUB_TOKEN belong to the GitHub Actions app, so a required
+          # check bound to it can be forged by anyone who can run a workflow in the repo.
+          GITHUB_ACTIONS_APP = 15368
 
           # Changed lines a clean roll may contain, per kind of file. Anything else (scripts, index options,
           # URL requirements, non-registry resolutions) is not a pin or lockfile update (gate.toml dependency-roll).
@@ -78,13 +81,14 @@ jobs:
           _OP = r"(==|>=|<=|~=|!=|<|>)"
           LINE_RULES = {
               # "name": "^1.2.3", in package.json dependency maps; removed and added lines alike
-              "npm-manifest": re.compile(r'^\s*"(@[a-z0-9._-]+/)?[a-z0-9._-]+":\s*"[\^~]?' + _VERSION + r'",?\s*$'),
+              "npm-manifest": re.compile(r'^\s*"(?P<key>(@[a-z0-9._-]+/)?[a-z0-9._-]+)":\s*"[\^~]?' + _VERSION + r'",?\s*$'),
               # name==1.2.3 or name>=1.2,<2 with an optional trailing comment; no options, URLs or markers
               "pip-requirements": re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._,-]+\])?\s*" + _OP + r"\s*"
                                              + _VERSION + r"(\s*,\s*" + _OP + r"\s*" + _VERSION + r")*\s*(#.*)?$"),
           }
           # Added lockfile lines may not point anywhere but the registry.
-          LOCK_FORBIDDEN = re.compile(r"tarball:|://|git\+|\bfile:|\blink:|\bgithub:")
+          LOCK_FORBIDDEN = re.compile(r"tarball:|://|git\+|git@|\bfile:|\blink:|\bgithub:|\brepo:|\bdirectory:|"
+                                      r"\btype:\s*(git|directory)\b")
 
 
           def pages(path):
@@ -146,12 +150,20 @@ jobs:
                   if not patch:
                       out.append(f"{shown}: no diff to check (too large or binary)")
                       continue
+                  keys = {"+": [], "-": []}
                   for sign, line in changed_lines(patch):
                       if kinds[0] == "npm-lock":
                           if sign == "+" and LOCK_FORBIDDEN.search(line):
                               out.append(f"{shown}: non-registry resolution: {json.dumps(line.strip())[:100]}")
-                      elif not LINE_RULES[kinds[0]].match(line):
+                          continue
+                      m = LINE_RULES[kinds[0]].match(line)
+                      if not m:
                           out.append(f"{shown}: not a version line: {json.dumps(line.strip())[:100]}")
+                      elif kinds[0] == "npm-manifest":
+                          keys[sign].append(m["key"])
+                  # A bump rewrites existing entries in place: the same keys go out and come back in.
+                  if sorted(keys["+"]) != sorted(keys["-"]):
+                      out.append(f"{shown}: adds or removes entries, not only versions")
 
               # Only patch and minor bumps of one dependency; a 0.x minor bump can break, so it counts as major.
               update = env.get("UPDATE_TYPE", "")
@@ -159,15 +171,22 @@ jobs:
                   out.append(f"update type {update!r}; only patch and minor bumps land alone")
               if "," in env.get("DEP_NAMES", ""):
                   out.append("several dependencies in one PR")
-              if update == "version-update:semver-minor" and env.get("PREV_VERSION", "0").startswith("0."):
+              # Semver: below 1.0 a minor bump can break, and below 0.1 even a patch bump can. Unknown counts as 0.x.
+              prev = env.get("PREV_VERSION", "").strip().lstrip("vV")
+              if update == "version-update:semver-minor" and (not prev or prev.startswith("0.")):
                   out.append(f"minor bump from {env.get('PREV_VERSION')!r}; 0.x minors can break, so a human lands it")
+              if update == "version-update:semver-patch" and (not prev or prev.startswith("0.0.")):
+                  out.append(f"patch bump from {env.get('PREV_VERSION')!r}; 0.0.x patches can break, so a human lands it")
 
-              # Auto-merge waits for required checks only if there are some, bound to the app that runs them.
+              # Auto-merge waits for required checks only if there are some that a workflow cannot fake: a
+              # required check bound to an app other than GitHub Actions, or a required workflow (ruleset).
               bound = [check for r in rules if r.get("type") == "required_status_checks"
                        for check in (r.get("parameters") or {}).get("required_status_checks", [])
-                       if check.get("integration_id")]
-              if not bound:
-                  out.append("no required status check bound to its app on the base branch; nothing would gate the roll")
+                       if check.get("integration_id") not in (None, GITHUB_ACTIONS_APP)]
+              workflows = [r for r in rules if r.get("type") == "workflows"]
+              if not bound and not workflows:
+                  out.append("no required workflow, and no required check bound to an app other than GitHub Actions, "
+                             "on the base branch; any workflow could fake the gate, so a human lands it")
               return out
 
 
