@@ -1,5 +1,5 @@
 # Fixture: quirq-ai/toolchains promoted.toml at d020ec6, the first promotion (V0-TCH-03).
-# Read by tests and the presubmit demo; the rotation reads the live file on toolchains main.
+# Read by tests only (through promoted.from_entry); the roller reads toolchains main with qqtc.
 schema = "quirq-toolchains-promoted/1"
 
 [[toolchain]]

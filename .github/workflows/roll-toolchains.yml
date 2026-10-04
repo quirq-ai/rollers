@@ -1,6 +1,10 @@
 # V0-ROL-01: the toolchain roller rotation. Reads the digests quirq-ai/toolchains promoted
-# (promoted.toml on its main) and opens or refreshes one roll PR per repo that rollers.toml lists,
-# editing infra/repo.toml only through qqsync. Roll PRs go through each repo's gate.
+# (promoted.toml on its main, through toolchains' own qqtc parser) and opens or refreshes one roll PR
+# per repo that rollers.toml lists, editing infra/repo.toml only through qqsync. Roll PRs go through
+# each repo's gate. Before a roll is written, each new pin is checked again here, failing closed: its
+# manifest must be exactly the one pinned layer (oras), and its build provenance must verify against
+# toolchains' build.yml on main (gh attestation verify). Both read ghcr anonymously, so they fail until
+# the toolchain packages are public. TODO(suraj): make ghcr quirq-ai/toolchains/{python,node} public.
 # Auto-merge stays off (no --auto-merge) until quirq-ai/toolchains enforces review of promotions on
 # its main; until then a roll stops at an open PR. TODO(suraj): turn on --auto-merge after that fix.
 #
@@ -24,7 +28,28 @@ concurrency:
   group: roll-toolchains
   cancel-in-progress: false
 jobs:
+  # toolchains' qqtc reads promoted.toml here, in a job with no secrets and a read-only token, so no
+  # code from toolchains ever runs where the bot token exists. Its JSON output is data to the roll job.
+  promoted:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      entries: ${{ steps.read.outputs.entries }}
+      commit: ${{ steps.read.outputs.commit }}
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: read promoted.toml on toolchains main with its qqtc
+        id: read
+        run: |
+          git clone -q --depth 1 --branch main https://github.com/quirq-ai/toolchains toolchains
+          cd toolchains
+          entries=$(env -i PATH="$PATH" python -I tools/qqtc.py promoted-changed)
+          echo "entries=$(jq -c . <<<"$entries")" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
   roll:
+    needs: promoted
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -35,14 +60,15 @@ jobs:
         with:
           python-version: "3.14"
       - run: python -m pip install --quiet .
-      - name: check out infra-config at the pinned commit, and toolchains main
-        id: src
+      - name: check out infra-config at the pinned commit
+        env:
+          ENTRIES: ${{ needs.promoted.outputs.entries }}
         run: |
           git init -q .qq/infra-config
           git -C .qq/infra-config fetch -q --depth 1 https://github.com/quirq-ai/infra-config "$(cat infra-config.commit)"
           git -C .qq/infra-config checkout -q FETCH_HEAD
-          git clone -q --depth 1 https://github.com/quirq-ai/toolchains .qq/toolchains
-          echo "toolchains=$(git -C .qq/toolchains rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          printf '%s' "$ENTRIES" > "$RUNNER_TEMP/promoted.json"
+      - uses: oras-project/setup-oras@005458ad77f1c8facd38a094e4af2e69e5607ff4 # v2.0.2
       - name: bot token
         id: bot
         if: env.HAS_BOT == 'true'
@@ -58,10 +84,15 @@ jobs:
         env:
           QQ_ROLLER_TOKEN: ${{ steps.bot.outputs.token }}
           QQ_READ_TOKEN: ${{ github.token }}   # dry runs read public repos without the shared IP rate limit
+          GH_TOKEN: ${{ github.token }}        # gh attestation verify reads toolchains' public attestations
+          TOOLCHAINS_COMMIT: ${{ needs.promoted.outputs.commit }}
         run: |
+          # The promoted job ran toolchains code, which can write any of that job's outputs: both are
+          # checked here (the entries again in qqroll), never used as they came.
+          [[ "$TOOLCHAINS_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::promoted job gave no commit sha"; exit 1; }
           apply=
           if [ -n "$QQ_ROLLER_TOKEN" ]; then apply=--apply
           else echo "::warning::no quirq infra bot token (QQ_BOT_CLIENT_ID); dry run only"; fi
-          qqroll rotation --infra-config .qq/infra-config --promoted .qq/toolchains/promoted.toml \
-            --promoted-from "quirq-ai/toolchains@${{ steps.src.outputs.toolchains }}" \
+          qqroll rotation --infra-config .qq/infra-config --promoted-json "$RUNNER_TEMP/promoted.json" \
+            --promoted-from "quirq-ai/toolchains@$TOOLCHAINS_COMMIT (main)" \
             --rollers-commit "quirq-ai/rollers@$GITHUB_SHA" $apply

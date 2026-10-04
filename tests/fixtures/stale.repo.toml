@@ -1,6 +1,6 @@
-# Fixture: a manifest one toolchain promotion behind. The python pin is an older digest, the node
-# pin is current, and the deps pin is not a toolchain, so a roll changes only python's version
-# and digest lines.
+# Fixture: a manifest one toolchain promotion behind, in sync's oci:// pin form (source = the image
+# manifest by digest, digest = its one layer). The python pin is an older image, the node pin is
+# current, and the deps pin is not a toolchain, so a roll changes only python's version and pin.
 schema = "quirq-repo/1"
 
 [qq]
@@ -8,11 +8,11 @@ version = "0.1.0"
 
 [toolchains.python]
 version = "3.14.7"   # rollers keep this current
-platforms."linux-x86_64" = { source = "oci://ghcr.io/quirq-ai/toolchains/python", digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111" }
+platforms."linux-x86_64" = { source = "oci://ghcr.io/quirq-ai/toolchains/python@sha256:1111111111111111111111111111111111111111111111111111111111111111", digest = "sha256:2222222222222222222222222222222222222222222222222222222222222222" }
 
 [toolchains.node]
 version = "24.21.0"
-platforms."linux-x86_64" = { source = "oci://ghcr.io/quirq-ai/toolchains/node", digest = "sha256:a84e067c794c73ba5ecf72064bcb6940e67f51f3fce7803edc54040e8c69a173" }
+platforms."linux-x86_64" = { source = "oci://ghcr.io/quirq-ai/toolchains/node@sha256:a84e067c794c73ba5ecf72064bcb6940e67f51f3fce7803edc54040e8c69a173", digest = "sha256:8c0ab89a2bc9a397f443ae9196ec95535e60e5ead1378a920cf44b2b2b392d01" }
 
 [deps.recipes]
 source = "https://github.com/quirq-ai/recipes"
