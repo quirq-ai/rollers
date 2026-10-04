@@ -35,6 +35,18 @@ Every repo that a `tool = "dependabot"` roller covers gets two generated files, 
   - Every changed line is a version: existing dependency entries in `package.json` rewritten in place
     (no entries added or removed), plain pins in requirements files (no index options, URLs or
     markers), and registry-only lockfile entries.
+  - `pnpm-lock.yaml` moves only that dependency. In `importers` and `settings` only its specifier and
+    version change (and its version inside other entries' peer suffixes). In `packages` and `snapshots`
+    existing entries stay byte for byte, except that an existing snapshot's edge to the bumped
+    dependency moves from the previous to the new version; every added package's integrity is the one
+    registry.npmjs.org publishes for it, with no tarball or other source, and its other fields (engines,
+    os, cpu, libc, bins, peers, bundled dependencies) say what the registry manifest says; every added
+    or changed snapshot's edges are dependencies its registry manifest declares, of the same kind, at
+    versions its ranges allow, and it is marked optional only when reached through an optional edge;
+    every added entry is reachable from the bumped dependency; and nothing removed is still in use.
+    Anything it cannot verify (a registry error, an alias, a range form it does not read, more than 400
+    added entries) is not clean. Not checked: which in-range version a new transitive dependency
+    resolves to (pnpm picks the newest; a lockfile may pin any version its dependent accepts).
   - It bumps one dependency by a patch or minor version. Below 1.0 a minor bump counts as major, below
     0.1 a patch bump does too, and an unknown previous version counts as 0.x.
   - The base branch has a gate a workflow cannot fake: a required workflow (ruleset) pinned by sha, or
@@ -103,7 +115,7 @@ QQ_ROLLER_TOKEN=... qqroll rotation --infra-config ../infra-config --toolchains 
 
 `.github/workflows/roll-toolchains.yml` runs the rotation weekly (the `rollers.toml` cadence), on
 `repository_dispatch` (`toolchain-promoted`) and by hand. Roll PRs need the quirq rollers App (a GitHub
-App), because PRs opened with a workflow's `GITHUB_TOKEN` trigger no workflows; without its secrets the
+App, named quirqer on GitHub; nothing depends on the name), because PRs opened with a workflow's `GITHUB_TOKEN` trigger no workflows; without its secrets the
 workflow is a dry run. A branch that already holds the same roll is not pushed again. The registry
 checks read ghcr anonymously, so until the toolchain packages are public every roll fails closed. Auto-merge (`--auto-merge`) stays off until `toolchains` enforces review of
 promotions on its `main`, so for now a roll stops at an open PR.
@@ -127,7 +139,7 @@ QQ_TOOLCHAINS=../toolchains QQ_SYNC=../sync python -m pytest -q
 
 | Item | What | PR | State |
 |---|---|---|---|
-| V0-ROL-02 | Lockfile updates (Dependabot config from `rollers.toml`) | #2; delivery xo-space#213, innernet#38 | merged here; delivery PRs wait on suraj, then the done-when on V0-ORG-03 (merge queue, auto-merge setting) |
-| V0-ROL-01 | Toolchain pin roller | #3 | merged; done-when waits on V0-ONB-01 (manifests), V0-ORG-03, the quirq rollers App, and toolchains enforcing promotion review (auto-merge held off until then) |
+| V0-ROL-02 | Lockfile updates (Dependabot config from `rollers.toml`) | #2; delivery xo-space#213, innernet#38 | merged here and in xo-space; innernet#38 waits on innernet's gate; auto-land stays off until the lockfile tree check (ROL-R6) is audited and redelivered |
+| V0-ROL-01 | Toolchain pin roller | #3 | merged; done-when waits on V0-ONB-01 (manifests), V0-ORG-03, and toolchains enforcing promotion review (auto-merge held off until then) |
 
 Plan and every v0 item: `quirq-ai/infra-config`, `docs/plan.md` and `docs/v0.md`.
