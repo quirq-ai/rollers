@@ -22,6 +22,11 @@ on:
   schedule:
     - cron: "23 6 * * 1"   # weekly, rollers.toml cadence for the toolchains roller
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Mint the bot token and check its scope, but open no PRs"
+        type: boolean
+        default: true
   repository_dispatch:
     types: [toolchain-promoted]
 permissions:
@@ -97,8 +102,20 @@ jobs:
           repositories: ${{ steps.src.outputs.repos }}   # exactly the repos rollers.toml's toolchains roller covers
           permission-contents: write
           permission-pull-requests: write
+      - name: check the bot token's scope
+        if: env.HAS_BOT == 'true'
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          WANT: ${{ steps.src.outputs.repos }}
+        run: |
+          # The token must reach exactly the repos rollers.toml's toolchains roller covers.
+          got=$(gh api --paginate /installation/repositories --jq '.repositories[].name' | sort | paste -sd, -)
+          want=$(tr , '\n' <<<"$WANT" | sort | paste -sd, -)
+          echo "bot token reaches: $got"
+          [ "$got" = "$want" ] || { echo "::error::bot token reaches '$got', expected '$want'"; exit 1; }
       - name: roll
         env:
+          DRY_RUN: ${{ inputs.dry_run }}   # empty on schedule and repository_dispatch
           QQ_ROLLER_TOKEN: ${{ steps.bot.outputs.token }}
           QQ_READ_TOKEN: ${{ github.token }}   # dry runs read public repos without the shared IP rate limit
           GH_TOKEN: ${{ github.token }}        # gh attestation verify reads toolchains' public attestations
@@ -108,7 +125,8 @@ jobs:
           # checked here (the entries again in qqroll), never used as they came.
           [[ "$TOOLCHAINS_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::promoted job gave no commit sha"; exit 1; }
           apply=
-          if [ -n "$QQ_ROLLER_TOKEN" ]; then apply=--apply
+          if [ "$DRY_RUN" = "true" ]; then echo "dry run requested; opening no PRs"
+          elif [ -n "$QQ_ROLLER_TOKEN" ]; then apply=--apply
           else echo "::warning::no quirq rollers App token (QQ_ROLLERS_APP_CLIENT_ID); dry run only"; fi
           qqroll rotation --infra-config .qq/infra-config --promoted-json "$RUNNER_TEMP/promoted.json" \
             --promoted-from "quirq-ai/toolchains@$TOOLCHAINS_COMMIT (main)" \
