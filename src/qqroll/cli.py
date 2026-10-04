@@ -17,6 +17,13 @@ def _commit(args) -> str:
     raise SystemExit("qqroll: pass --commit (the infra-config commit the config came from)")
 
 
+def _warning(text: str, *, actions: bool) -> str:
+    """A warning line; in GitHub Actions an annotation, escaped so data cannot end it or start another."""
+    if not actions:
+        return f"warning: {text}"
+    return "::warning::" + text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
 def cmd_dependabot(args) -> int:
     from qqroll import dependabot
     from qqroll.config import ConfigError, load, rollers
@@ -50,7 +57,7 @@ def cmd_roll(args) -> int:
 
     try:
         kinds_pins = toolchain_pins(load(args.infra_config)) if args.infra_config else None
-        new = promoted.parse(Path(args.promoted).read_text(), args.promoted)
+        new = promoted.load(args.toolchains)
         with open(args.manifest, encoding="utf-8", newline="") as f:
             text = f.read()
         r = roll.plan(text, new, source=args.manifest, kinds_pins=kinds_pins)
@@ -62,11 +69,11 @@ def cmd_roll(args) -> int:
     for c in r.changes:
         print(f"rolled {c}")
     if not r.changed:
-        print("toolchain pins are current")
+        print(f"not rolled ({len(r.skipped)} skipped)" if r.skipped else "toolchain pins are current")
     elif not args.dry_run:
         with open(args.manifest, "w", encoding="utf-8", newline="") as f:
             f.write(r.new_text)
-    return 0
+    return 1 if r.skipped else 0  # a skipped pin needs a person; never report it as current
 
 
 def cmd_rotation(args) -> int:
@@ -85,7 +92,7 @@ def cmd_rotation(args) -> int:
         return 1
     try:
         cfg = load(args.infra_config)
-        new = promoted.parse(Path(args.promoted).read_text(), args.promoted)
+        new = promoted.load(args.toolchains)
         name = args.backend or cfg.get("org", {}).get("org", {}).get("default_backend", "github")
         backend = backends.load(name, token=token if args.apply else read_token, slugs=dependabot.github_slugs(cfg))
         report = rotation.run(backend, rollers(cfg), new, kinds_pins=toolchain_pins(cfg),
@@ -99,7 +106,7 @@ def cmd_rotation(args) -> int:
     for line in report.lines:
         print(line)
     for w in report.warnings:
-        print(f"warning: {w}", file=sys.stderr)
+        print(_warning(w, actions=os.environ.get("GITHUB_ACTIONS") == "true"), file=sys.stderr)
     return 1 if report.failed else 0
 
 
@@ -117,7 +124,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_dependabot)
 
     p = sub.add_parser("roll", help="roll one manifest's toolchain pins to promoted digests (V0-ROL-01)")
-    p.add_argument("--promoted", required=True, help="quirq-ai/toolchains promoted.toml")
+    p.add_argument("--toolchains", required=True,
+                   help="a quirq-ai/toolchains checkout of main; promoted.toml is read with its own qqtc parser")
     p.add_argument("--manifest", default="infra/repo.toml", help="manifest to edit in place")
     p.add_argument("--infra-config", help="infra-config checkout; keeps rolls inside its kinds.toml pins")
     p.add_argument("--dry-run", action="store_true", help="report the roll without writing")
@@ -125,9 +133,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("rotation", help="roll every repo rollers.toml lists and open roll PRs (V0-ROL-01)")
     p.add_argument("--infra-config", required=True, help="path to a quirq-ai/infra-config checkout")
-    p.add_argument("--promoted", required=True, help="quirq-ai/toolchains promoted.toml")
+    p.add_argument("--toolchains", required=True,
+                   help="a quirq-ai/toolchains checkout of main; promoted.toml is read with its own qqtc parser")
     p.add_argument("--promoted-from", default="an unrecorded commit",
-                   help="where promoted.toml came from, for the PR body (e.g. quirq-ai/toolchains@<sha>)")
+                   help="where the toolchains checkout came from, for the PR body (e.g. quirq-ai/toolchains@<sha>)")
     p.add_argument("--rollers-commit", default="an unrecorded commit", help="this repo's commit, for the PR body")
     p.add_argument("--backend", help="where repos live (default: infra-config org default_backend; "
                                      "github now, launchpad later)")

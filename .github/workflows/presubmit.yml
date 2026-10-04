@@ -8,6 +8,13 @@ on:
     branches: [main]
 permissions:
   contents: read
+env:
+  # Read-only inputs at pinned commits: toolchains for its own promoted.toml parser (qqtc), sync for
+  # its manifest fixture. Tests that need them read QQ_TOOLCHAINS and QQ_SYNC.
+  TOOLCHAINS_COMMIT: b46e55e196558bcf334c964e2b586e8d110240d6
+  SYNC_COMMIT: c51e40205e26771cd88bfc02e0c7522b5ee8271d
+  QQ_TOOLCHAINS: .qq/toolchains
+  QQ_SYNC: .qq/sync
 jobs:
   test:
     runs-on: ubuntu-24.04
@@ -18,7 +25,15 @@ jobs:
         with:
           python-version: "3.14"
       - run: python -m pip install --quiet -e ".[test]"
-      - run: python -m pytest -q -p no:cacheprovider
+      - name: check out toolchains and sync at pinned commits
+        run: |
+          for r in "toolchains $TOOLCHAINS_COMMIT" "sync $SYNC_COMMIT"; do
+            set -- $r
+            git init -q ".qq/$1"
+            git -C ".qq/$1" fetch -q --depth 1 "https://github.com/quirq-ai/$1" "$2"
+            git -C ".qq/$1" checkout -q FETCH_HEAD
+          done
+      - run: python -m pytest -q -p no:cacheprovider -rs
       # infra-config is used by pinned commit (infra-config.commit), read through its own qqcfg.
       - name: check out infra-config at the pinned commit
         run: |
@@ -35,6 +50,6 @@ jobs:
         run: |
           d=$(mktemp -d)
           cp tests/fixtures/stale.repo.toml "$d/repo.toml"
-          qqroll roll --promoted tests/fixtures/promoted.toml --manifest "$d/repo.toml" --infra-config .qq/infra-config
+          qqroll roll --toolchains .qq/toolchains --manifest "$d/repo.toml" --infra-config .qq/infra-config
           cmp "$d/repo.toml" tests/fixtures/rolled.repo.toml
-          qqroll roll --promoted tests/fixtures/promoted.toml --manifest "$d/repo.toml" | grep -q 'toolchain pins are current'
+          qqroll roll --toolchains .qq/toolchains --manifest "$d/repo.toml" | grep -q 'toolchain pins are current'

@@ -26,6 +26,11 @@ class Report:
         self.lines.append(line)
 
 
+def _cell(value: str) -> str:
+    """A Markdown table cell: no pipes or line breaks from data."""
+    return str(value).replace("\\", "\\\\").replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+
 def title(changes: list[roll.Change]) -> str:
     names = sorted({f"{c.new.name} {c.new.version}-r{c.new.revision}" for c in changes})
     return "roll: toolchains " + ", ".join(names)
@@ -35,12 +40,17 @@ def body(changes: list[roll.Change], promoted_from: str, rollers_commit: str, au
          path: str = str(DEFAULT_PATH)) -> str:
     landing = ("An agent may land it alone once the gate passes (D4); auto-merge is on." if auto_merge else
                "Auto-merge is off for now, so it waits at an open PR for someone to land it.")
-    rows = "\n".join(f"| {c.toolchain} | {c.platform} | `{c.old_digest}` | `{c.new.digest}` | "
-                     f"{c.new.version}-r{c.new.revision} | {c.new.build_run or ''} |" for c in changes)
+    rows = "\n".join("| " + " | ".join(_cell(v) for v in (
+        c.toolchain, c.platform, f"`{c.old_digest}`", f"`{c.new.manifest}` / `{c.new.digest}`",
+        f"{c.new.version}-r{c.new.revision}", c.new.build_run)) + " |" for c in changes)
     return (f"Moves toolchain pins in `{path}` to the digests quirq-ai/toolchains promoted "
             f"(`promoted.toml` at {promoted_from}).\n\n"
-            "| Toolchain | Platform | From | To | Version | Build |\n|---|---|---|---|---|---|\n"
+            "| Toolchain | Platform | From (layer) | To (manifest / layer) | Version | Build |\n"
+            "|---|---|---|---|---|---|\n"
             f"{rows}\n\n"
+            "Each new pin was checked before this PR was written: it is in promoted.toml on toolchains "
+            "main, its manifest is exactly the one pinned layer, and its build provenance verifies "
+            "against toolchains' build.yml on main.\n\n"
             f"Change class: `dependency-roll` (infra-config gate.toml). {landing}\n\n"
             f"Written through qqsync by quirq-ai/rollers at {rollers_commit} (V0-ROL-01).\n")
 
@@ -50,6 +60,7 @@ def run(backend, rollers: list[dict], promoted: list[Promoted], *, kinds_pins: d
         manifests: dict[str, str] | None = None) -> Report:
     """`manifests` maps repo names to their manifest path (infra-config repos.toml), default infra/repo.toml."""
     report = Report()
+    verified: dict[Promoted, str | None] = {}
     config = [r for r in rollers if r["tool"] == "quirq-rollers" and r["name"] == ROLLER]
     if not config:
         report.warnings.append(f"rollers.toml has no quirq-rollers roller named {ROLLER!r}; nothing to roll")
@@ -57,15 +68,16 @@ def run(backend, rollers: list[dict], promoted: list[Promoted], *, kinds_pins: d
     for repo in sorted({repo for r in config for repo in r["repos"]}):
         path = (manifests or {}).get(repo, str(DEFAULT_PATH))
         try:
-            _roll_repo(backend, repo, path, promoted, report, kinds_pins=kinds_pins, promoted_from=promoted_from,
-                       rollers_commit=rollers_commit, apply=apply, auto_merge=auto_merge)
+            _roll_repo(backend, repo, path, promoted, report, verified, kinds_pins=kinds_pins,
+                       promoted_from=promoted_from, rollers_commit=rollers_commit, apply=apply,
+                       auto_merge=auto_merge)
         except BackendError as e:
             report.failed = True
             report.warnings.append(f"{repo}: not rolled: {e}")
     return report
 
 
-def _roll_repo(backend, repo, path, promoted, report, *, kinds_pins, promoted_from, rollers_commit, apply,
+def _roll_repo(backend, repo, path, promoted, report, verified, *, kinds_pins, promoted_from, rollers_commit, apply,
                auto_merge) -> None:
     base = backend.default_branch(repo)
     base_sha = backend.head(repo, base)  # read and commit against the same commit, so nothing is reverted
@@ -79,9 +91,21 @@ def _roll_repo(backend, repo, path, promoted, report, *, kinds_pins, promoted_fr
         report.warnings.append(f"{repo}: manifest is invalid, not rolled:\n{e}")
         return
     report.warnings.extend(f"{repo}: {s}" for s in r.skipped)
+    if r.skipped:
+        report.failed = True  # a skipped pin needs a person; never report it as current
     if not r.changed:
         # TODO(expert): close a leftover qq-roll/toolchains PR once main is current by other means.
-        report.say(f"{repo}: toolchain pins are current")
+        report.say(f"{repo}: not rolled ({len(r.skipped)} skipped)" if r.skipped
+                   else f"{repo}: toolchain pins are current")
+        return
+    for p in {c.new for c in r.changes}:
+        if p not in verified:
+            verified[p] = backend.verify_promotion(p)
+    bad = sorted({f"{p.label}: {verified[p]}" for p in {c.new for c in r.changes} if verified[p]})
+    if bad:
+        report.failed = True
+        report.warnings.extend(f"{repo}: not rolled, a promotion did not verify: {b}" for b in bad)
+        report.say(f"{repo}: not rolled (a promotion did not verify)")
         return
     for c in r.changes:
         report.say(f"{repo}: {c}")

@@ -1,6 +1,10 @@
 # V0-ROL-01: the toolchain roller rotation. Reads the digests quirq-ai/toolchains promoted
-# (promoted.toml on its main) and opens or refreshes one roll PR per repo that rollers.toml lists,
-# editing infra/repo.toml only through qqsync. Roll PRs go through each repo's gate.
+# (promoted.toml on its main, through toolchains' own qqtc parser) and opens or refreshes one roll PR
+# per repo that rollers.toml lists, editing infra/repo.toml only through qqsync. Roll PRs go through
+# each repo's gate. Before a roll is written, each new pin is checked again here, failing closed: its
+# manifest must be exactly the one pinned layer (oras), and its build provenance must verify against
+# toolchains' build.yml on main (gh attestation verify). Both read ghcr anonymously, so they fail until
+# the toolchain packages are public. TODO(suraj): make ghcr quirq-ai/toolchains/{python,node} public.
 # Auto-merge stays off (no --auto-merge) until quirq-ai/toolchains enforces review of promotions on
 # its main; until then a roll stops at an open PR. TODO(suraj): turn on --auto-merge after that fix.
 #
@@ -43,6 +47,7 @@ jobs:
           git -C .qq/infra-config checkout -q FETCH_HEAD
           git clone -q --depth 1 https://github.com/quirq-ai/toolchains .qq/toolchains
           echo "toolchains=$(git -C .qq/toolchains rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: oras-project/setup-oras@005458ad77f1c8facd38a094e4af2e69e5607ff4 # v2.0.2
       - name: bot token
         id: bot
         if: env.HAS_BOT == 'true'
@@ -58,10 +63,11 @@ jobs:
         env:
           QQ_ROLLER_TOKEN: ${{ steps.bot.outputs.token }}
           QQ_READ_TOKEN: ${{ github.token }}   # dry runs read public repos without the shared IP rate limit
+          GH_TOKEN: ${{ github.token }}        # gh attestation verify reads toolchains' public attestations
         run: |
           apply=
           if [ -n "$QQ_ROLLER_TOKEN" ]; then apply=--apply
           else echo "::warning::no quirq infra bot token (QQ_BOT_CLIENT_ID); dry run only"; fi
-          qqroll rotation --infra-config .qq/infra-config --promoted .qq/toolchains/promoted.toml \
+          qqroll rotation --infra-config .qq/infra-config --toolchains .qq/toolchains \
             --promoted-from "quirq-ai/toolchains@${{ steps.src.outputs.toolchains }}" \
             --rollers-commit "quirq-ai/rollers@$GITHUB_SHA" $apply

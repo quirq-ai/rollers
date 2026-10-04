@@ -7,9 +7,9 @@ import pytest
 from qqroll import backends, promoted, rotation
 from qqroll.backends.github import Backend, BackendError
 from qqroll.cli import main
+from promoted_support import PROMOTED, digest, entry, image
 
 FIX = Path(__file__).parent / "fixtures"
-PROMOTED = promoted.parse((FIX / "promoted.toml").read_text())
 STALE = (FIX / "stale.repo.toml").read_text()
 ROLLED = (FIX / "rolled.repo.toml").read_text()
 ROLLERS = [{"name": "toolchains", "repos": ["xo-space", "innernet"], "moves": "toolchain pins",
@@ -76,8 +76,20 @@ def writes(fake):
     return [(m, path) for m, path, *_ in fake.calls if m in ("POST", "PATCH")]
 
 
+class Verified(Backend):
+    """A backend whose promotions all verify, or fail with `reason`; verify_promotion has its own tests."""
+
+    def __init__(self, *a, reason=None, **kw):
+        super().__init__(*a, **kw)
+        self.reason, self.verified = reason, []
+
+    def verify_promotion(self, p, toolchains="quirq-ai/toolchains"):
+        self.verified.append(p)
+        return self.reason
+
+
 def run(fake, apply=True, kinds_pins=None, auto_merge=True):
-    backend = Backend(token="t", request=fake)
+    backend = Verified(token="t", request=fake)
     return rotation.run(backend, ROLLERS, PROMOTED, kinds_pins=kinds_pins, promoted_from="toolchains@d020ec6",
                         rollers_commit="abc", apply=apply, auto_merge=auto_merge)
 
@@ -152,7 +164,7 @@ def test_one_failing_repo_does_not_stop_the_others():
         if "/innernet" in url:
             return 502, b'{"message": "Bad gateway"}'
         return fake(method, url, headers, body)
-    report = rotation.run(Backend(token="t", request=flaky), ROLLERS, PROMOTED, kinds_pins=None,
+    report = rotation.run(Verified(token="t", request=flaky), ROLLERS, PROMOTED, kinds_pins=None,
                           promoted_from="p", rollers_commit="r", apply=True)
     assert report.failed and "innernet: not rolled" in report.warnings[0]
     assert report.prs == ["https://github.com/quirq-ai/x/pull/7"]
@@ -160,7 +172,7 @@ def test_one_failing_repo_does_not_stop_the_others():
 
 def test_manifest_path_comes_from_config():
     fake = FakeGitHub({"xo-space": STALE})
-    rotation.run(Backend(token="t", request=fake), ROLLERS, PROMOTED, kinds_pins=None, promoted_from="p",
+    rotation.run(Verified(token="t", request=fake), ROLLERS, PROMOTED, kinds_pins=None, promoted_from="p",
                  rollers_commit="r", apply=False, manifests={"xo-space": "build/repo.toml"})
     assert any("/contents/build/repo.toml" in path for _, path, *_ in fake.calls)
 
@@ -215,6 +227,77 @@ def test_backend_loader():
 
 def test_cli_apply_needs_the_bot_token(monkeypatch, capsys, tmp_path):
     monkeypatch.delenv("QQ_ROLLER_TOKEN", raising=False)
-    args = ["rotation", "--infra-config", str(tmp_path), "--promoted", str(FIX / "promoted.toml"), "--apply"]
+    args = ["rotation", "--infra-config", str(tmp_path), "--toolchains", str(tmp_path), "--apply"]
     assert main(args) == 1
     assert "GITHUB_TOKEN trigger no workflows" in capsys.readouterr().err
+
+
+def test_unverified_promotion_is_not_rolled():
+    fake = FakeGitHub({"xo-space": STALE, "innernet": STALE})
+    backend = Verified(token="t", request=fake, reason="no build provenance")
+    report = rotation.run(backend, ROLLERS, PROMOTED, kinds_pins=None, promoted_from="p", rollers_commit="r",
+                          apply=True)
+    assert report.failed and report.prs == [] and writes(fake) == []
+    assert "a promotion did not verify: python 3.14.8-r1 (linux-x86_64): no build provenance" in report.warnings[0]
+    assert len(backend.verified) == 1   # verified once, not once per repo
+
+
+def test_skipped_pin_fails_the_rotation():
+    other = STALE.replace("toolchains/python@", "someone/python@")
+    report = run(FakeGitHub({"xo-space": other, "innernet": ROLLED}))
+    assert report.failed and "xo-space: not rolled (1 skipped)" in report.lines
+
+
+def test_body_cells_cannot_break_the_table():
+    assert rotation._cell("a|b\nc") == "a\\|b c"
+
+
+def _verify(raw, p=None, codes=(0, 0)):
+    calls = []
+    def fake_run(argv):
+        calls.append(argv)
+        return (codes[0], raw, "oras failed") if argv[0] == "oras" else (codes[1], b"", "gh failed")
+    p = p or promoted.from_entry(entry(ref="oci://ghcr.io/quirq-ai/toolchains/python@" + digest(raw)))
+    return Backend(run=fake_run).verify_promotion(p), calls
+
+
+GOOD = image("sha256:230c6677ccbaba9043c810b9c4a6096ed354c8a981bb62ea90bd059b12d1b03c")
+
+
+def test_verify_promotion_runs_the_promotion_gate_checks():
+    reason, calls = _verify(GOOD)
+    assert reason is None
+    ref = "ghcr.io/quirq-ai/toolchains/python@" + digest(GOOD)
+    assert calls[0] == ["oras", "manifest", "fetch", ref]
+    assert calls[1] == ["gh", "attestation", "verify", "oci://" + ref, "--repo", "quirq-ai/toolchains",
+                        "--signer-workflow", "quirq-ai/toolchains/.github/workflows/build.yml",
+                        "--source-ref", "refs/heads/main",
+                        "--source-digest", "5739fee9704d291a8ef3d405d5e2bf0949b74e32"]
+
+
+@pytest.mark.parametrize("raw, match", [
+    (image("sha256:" + "5" * 64), "not exactly one toolchain layer"),
+    (image("sha256:230c6677ccbaba9043c810b9c4a6096ed354c8a981bb62ea90bd059b12d1b03c", layers=2),
+     "not exactly one toolchain layer"),
+    (image("sha256:230c6677ccbaba9043c810b9c4a6096ed354c8a981bb62ea90bd059b12d1b03c", artifact="x"),
+     "not exactly one toolchain layer"),
+    (image("sha256:230c6677ccbaba9043c810b9c4a6096ed354c8a981bb62ea90bd059b12d1b03c", media="x"),
+     "not exactly one toolchain layer"),
+    (b'{"layers": []}', "not a toolchain image manifest"),
+    (b"not json", "not a toolchain image manifest"),
+])
+def test_verify_promotion_rejects_other_shapes(raw, match):
+    reason, calls = _verify(raw)
+    assert match in reason and len(calls) == 1   # provenance is not checked for a wrong shape
+
+
+def test_verify_promotion_fails_closed():
+    # The manifest must hash to the pinned digest.
+    reason, _ = _verify(GOOD, p=PROMOTED[1])
+    assert "does not hash to" in reason
+    reason, _ = _verify(GOOD, codes=(1, 0))
+    assert "cannot fetch the manifest" in reason and "oras failed" in reason
+    reason, _ = _verify(GOOD, codes=(0, 1))
+    assert "no build provenance" in reason and "gh failed" in reason
+    missing = Backend(run=lambda argv: (127, b"", f"{argv[0]} is not installed"))
+    assert "oras is not installed" in missing.verify_promotion(PROMOTED[1])

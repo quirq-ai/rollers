@@ -6,7 +6,10 @@ GITHUB_TOKEN trigger no workflows, so they would never be gated.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import shutil
+import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -26,9 +29,24 @@ def _urllib_request(method: str, url: str, headers: dict, body: bytes | None) ->
         return e.code, e.read()
 
 
+def _run(argv: list[str]) -> tuple[int, bytes, str]:
+    if shutil.which(argv[0]) is None:
+        return 127, b"", f"{argv[0]} is not installed"
+    try:
+        proc = subprocess.run(argv, capture_output=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 1, b"", str(e)
+    return proc.returncode, proc.stdout, proc.stderr.decode(errors="replace").strip()
+
+
+TOOLCHAIN_ARTIFACT = "application/vnd.quirq.toolchain.v1"
+TOOLCHAIN_LAYER = "application/vnd.quirq.toolchain.layer.v1.tar+gzip"
+
+
 class Backend:
     def __init__(self, token: str | None = None, slugs: dict[str, str] | None = None,
-                 org: str = "quirq-ai", request=_urllib_request):
+                 org: str = "quirq-ai", request=_urllib_request, run=_run):
+        self._run = run
         self.token = token
         self.slugs = slugs or {}   # repo name -> owner/name, from infra-config repos.toml
         self.org = org             # owner for repos repos.toml does not list
@@ -82,6 +100,38 @@ class Backend:
         if data.get("type") != "file" or data.get("encoding") != "base64":
             raise BackendError(f"{repo}:{path} is not a regular file")
         return base64.b64decode(data["content"]).decode("utf-8")
+
+    # --- verifying a promotion before rolling it ------------------------------------------------
+
+    def verify_promotion(self, p, toolchains: str = "quirq-ai/toolchains") -> str | None:
+        """Why `p` must not be rolled, or None when it checks out. Fails closed: a check that cannot
+        run is a reason. The same checks as toolchains' promotion gate, run again here:
+
+        1. the image manifest hashes to its digest and is exactly one toolchain layer, the pinned one;
+        2. its build provenance verifies against toolchains' build.yml on main, at `built_from`.
+        """
+        ref = f"{p.registry}/{p.repository}@{p.manifest}"
+        code, raw, err = self._run(["oras", "manifest", "fetch", ref])
+        if code != 0:
+            return f"cannot fetch the manifest of {ref}: {err or f'exit {code}'}"
+        if "sha256:" + hashlib.sha256(raw).hexdigest() != p.manifest:
+            return f"the manifest fetched for {ref} does not hash to {p.manifest}"
+        try:
+            doc = json.loads(raw)
+            layers = doc["layers"]
+            shape = (doc.get("artifactType"), len(layers), layers[0].get("digest"), layers[0].get("mediaType"))
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+            return f"{ref} is not a toolchain image manifest"
+        if shape != (TOOLCHAIN_ARTIFACT, 1, p.layer, TOOLCHAIN_LAYER):
+            return f"{ref} is not exactly one toolchain layer {p.layer}"
+        code, _, err = self._run([
+            "gh", "attestation", "verify", f"oci://{ref}", "--repo", toolchains,
+            "--signer-workflow", f"{toolchains}/.github/workflows/build.yml",
+            "--source-ref", "refs/heads/main", "--source-digest", p.built_from])
+        if code != 0:
+            return f"no build provenance for {ref} from {toolchains} build.yml on main at {p.built_from}: " \
+                   f"{err or f'exit {code}'}"
+        return None
 
     # --- writing ---------------------------------------------------------------------------------
 
