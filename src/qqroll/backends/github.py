@@ -1,6 +1,6 @@
 """The github backend: read a file from a repo and open or update a roll PR, over the REST API.
 
-Roll PRs must be opened with the quirq infra bot's token: PRs opened with a workflow's default
+Roll PRs must be opened with the quirq rollers App's token: PRs opened with a workflow's default
 GITHUB_TOKEN trigger no workflows, so they would never be gated.
 """
 from __future__ import annotations
