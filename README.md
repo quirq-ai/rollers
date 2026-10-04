@@ -102,7 +102,7 @@ QQ_ROLLER_TOKEN=... qqroll rotation --infra-config ../infra-config --toolchains 
 ```
 
 `.github/workflows/roll-toolchains.yml` runs the rotation weekly (the `rollers.toml` cadence), on
-`repository_dispatch` (`toolchain-promoted`) and by hand. Roll PRs need the quirq infra bot (a GitHub
+`repository_dispatch` (`toolchain-promoted`) and by hand. Roll PRs need the quirq rollers App (a GitHub
 App), because PRs opened with a workflow's `GITHUB_TOKEN` trigger no workflows; without its secrets the
 workflow is a dry run. A branch that already holds the same roll is not pushed again. The registry
 checks read ghcr anonymously, so until the toolchain packages are public every roll fails closed. Auto-merge (`--auto-merge`) stays off until `toolchains` enforces review of
@@ -128,6 +128,6 @@ QQ_TOOLCHAINS=../toolchains QQ_SYNC=../sync python -m pytest -q
 | Item | What | PR | State |
 |---|---|---|---|
 | V0-ROL-02 | Lockfile updates (Dependabot config from `rollers.toml`) | #2; delivery xo-space#213, innernet#38 | merged here; delivery PRs wait on suraj, then the done-when on V0-ORG-03 (merge queue, auto-merge setting) |
-| V0-ROL-01 | Toolchain pin roller | #3 | merged; done-when waits on V0-ONB-01 (manifests), V0-ORG-03, the quirq infra bot App, and toolchains enforcing promotion review (auto-merge held off until then) |
+| V0-ROL-01 | Toolchain pin roller | #3 | merged; done-when waits on V0-ONB-01 (manifests), V0-ORG-03, the quirq rollers App, and toolchains enforcing promotion review (auto-merge held off until then) |
 
 Plan and every v0 item: `quirq-ai/infra-config`, `docs/plan.md` and `docs/v0.md`.

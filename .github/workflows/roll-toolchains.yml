@@ -8,14 +8,13 @@
 # Auto-merge stays off (no --auto-merge) until quirq-ai/toolchains enforces review of promotions on
 # its main; until then a roll stops at an open PR. TODO(suraj): turn on --auto-merge after that fix.
 #
-# Roll PRs need the quirq infra bot (a GitHub App): PRs opened with this workflow's GITHUB_TOKEN would
+# Roll PRs need the quirq rollers App (a GitHub App): PRs opened with this workflow's GITHUB_TOKEN would
 # trigger no workflows, so they would never be gated. Until the App's secrets exist, this runs as a
 # dry run and prints the diffs it would open.
-# TODO(suraj): create the quirq infra bot App, one App shared by rollers, gardener and test-pipelines,
-# installed on the product repos (xo-space, innernet) with contents, pull requests and actions write
-# (actions is for gardener's re-runs and backfill dispatches), and add its client id and private key
-# as QQ_BOT_CLIENT_ID and QQ_BOT_PRIVATE_KEY on each consuming repo. Each job mints its own
-# short-lived token scoped down to what it needs; this one uses contents and pull requests only.
+# TODO(suraj): create the quirq rollers App, used by rollers only (one App per tool, so a leaked key
+# reaches no more than this tool needs), installed on the product repos (xo-space, innernet) with
+# contents and pull requests write only (no actions), and add its client id and private key to this
+# repo as QQ_ROLLERS_APP_CLIENT_ID and QQ_ROLLERS_APP_PRIVATE_KEY.
 # TODO(expert): have toolchains' promote workflow send repository_dispatch (toolchain-promoted) once
 # it can use the bot, so rolls start on promotion instead of on the weekly check.
 name: roll-toolchains
@@ -57,7 +56,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
-      HAS_BOT: ${{ secrets.QQ_BOT_CLIENT_ID != '' }}   # secrets are not readable in a step's `if`
+      HAS_BOT: ${{ secrets.QQ_ROLLERS_APP_CLIENT_ID != '' }}   # secrets are not readable in a step's `if`
     steps:
       # Everything this job runs is pinned (actions by sha, Python packages by hash or commit) and
       # installed before the bot token exists; no credentials are left in the checkout.
@@ -92,8 +91,8 @@ jobs:
         if: env.HAS_BOT == 'true'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ secrets.QQ_BOT_CLIENT_ID }}
-          private-key: ${{ secrets.QQ_BOT_PRIVATE_KEY }}
+          client-id: ${{ secrets.QQ_ROLLERS_APP_CLIENT_ID }}
+          private-key: ${{ secrets.QQ_ROLLERS_APP_PRIVATE_KEY }}
           owner: quirq-ai
           repositories: ${{ steps.src.outputs.repos }}   # exactly the repos rollers.toml's toolchains roller covers
           permission-contents: write
@@ -110,7 +109,7 @@ jobs:
           [[ "$TOOLCHAINS_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::promoted job gave no commit sha"; exit 1; }
           apply=
           if [ -n "$QQ_ROLLER_TOKEN" ]; then apply=--apply
-          else echo "::warning::no quirq infra bot token (QQ_BOT_CLIENT_ID); dry run only"; fi
+          else echo "::warning::no quirq rollers App token (QQ_ROLLERS_APP_CLIENT_ID); dry run only"; fi
           qqroll rotation --infra-config .qq/infra-config --promoted-json "$RUNNER_TEMP/promoted.json" \
             --promoted-from "quirq-ai/toolchains@$TOOLCHAINS_COMMIT (main)" \
             --rollers-commit "quirq-ai/rollers@$GITHUB_SHA" $apply
