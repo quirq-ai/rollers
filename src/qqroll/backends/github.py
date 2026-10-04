@@ -45,8 +45,11 @@ class Backend:
         if payload is not None:
             body = json.dumps(payload).encode()
             headers["Content-Type"] = "application/json"
-        status, raw = self._request(method, API + path, headers, body)
-        data = json.loads(raw) if raw else {}
+        try:
+            status, raw = self._request(method, API + path, headers, body)
+            data = json.loads(raw) if raw else {}
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
+            raise BackendError(f"{method} {path}: {e}") from None
         if status not in ok:
             message = data.get("message", "") if isinstance(data, dict) else ""
             raise BackendError(f"{method} {path}: HTTP {status} {message}".rstrip())

@@ -198,6 +198,15 @@ def test_backend_uses_configured_slugs():
     assert fake.calls[0][1] == "/repos/someone/xo-space"
 
 
+def test_network_errors_are_backend_errors():
+    def down(method, url, headers, body):
+        raise TimeoutError("timed out")
+    with pytest.raises(BackendError, match="timed out"):
+        Backend(request=down).default_branch("xo-space")
+    with pytest.raises(BackendError):
+        Backend(request=lambda *a: (502, b"<html>")).default_branch("xo-space")
+
+
 def test_backend_loader():
     assert isinstance(backends.load("github", token=None), Backend)
     with pytest.raises(ValueError, match="unknown backend 'launchpad'"):
