@@ -22,6 +22,11 @@ on:
   schedule:
     - cron: "23 6 * * 1"   # weekly, rollers.toml cadence for the toolchains roller
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Mint the bot token and check its scope, but open no PRs"
+        type: boolean
+        default: true
   repository_dispatch:
     types: [toolchain-promoted]
 permissions:
@@ -97,8 +102,33 @@ jobs:
           repositories: ${{ steps.src.outputs.repos }}   # exactly the repos rollers.toml's toolchains roller covers
           permission-contents: write
           permission-pull-requests: write
+      - name: check the bot token's scope
+        if: env.HAS_BOT == 'true'
+        env:
+          QQ_ROLLER_TOKEN: ${{ steps.bot.outputs.token }}
+          WANT: ${{ steps.src.outputs.repos }}
+        # The token must reach exactly the repos rollers.toml's toolchains roller covers. Read with the
+        # job's pinned Python, not gh: no tool outside qqroll's own install sees the bot token.
+        run: |
+          python -I - <<'EOF'
+          import json, os, sys, urllib.request
+          got, url = set(), "https://api.github.com/installation/repositories?per_page=100"
+          while url:
+              req = urllib.request.Request(url, headers={"Authorization": "Bearer " + os.environ["QQ_ROLLER_TOKEN"],
+                                                         "Accept": "application/vnd.github+json"})
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  got |= {r["full_name"].lower() for r in json.load(resp)["repositories"]}
+                  links = [l.split(";")[0].strip(" <>") for l in resp.headers.get("Link", "").split(",") if 'rel="next"' in l]
+              url = links[0] if links else None
+          want = {"quirq-ai/" + r.lower() for r in os.environ["WANT"].split(",")}
+          print("bot token reaches:", ", ".join(sorted(got)))
+          if got != want:
+              print(f"::error::bot token reaches {sorted(got)}, expected {sorted(want)}")
+              sys.exit(1)
+          EOF
       - name: roll
         env:
+          DRY_RUN: ${{ inputs.dry_run }}   # empty on schedule and repository_dispatch
           QQ_ROLLER_TOKEN: ${{ steps.bot.outputs.token }}
           QQ_READ_TOKEN: ${{ github.token }}   # dry runs read public repos without the shared IP rate limit
           GH_TOKEN: ${{ github.token }}        # gh attestation verify reads toolchains' public attestations
@@ -108,7 +138,8 @@ jobs:
           # checked here (the entries again in qqroll), never used as they came.
           [[ "$TOOLCHAINS_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::promoted job gave no commit sha"; exit 1; }
           apply=
-          if [ -n "$QQ_ROLLER_TOKEN" ]; then apply=--apply
+          if [ "$DRY_RUN" = "true" ]; then echo "dry run requested; opening no PRs"
+          elif [ -n "$QQ_ROLLER_TOKEN" ]; then apply=--apply
           else echo "::warning::no quirq rollers App token (QQ_ROLLERS_APP_CLIENT_ID); dry run only"; fi
           qqroll rotation --infra-config .qq/infra-config --promoted-json "$RUNNER_TEMP/promoted.json" \
             --promoted-from "quirq-ai/toolchains@$TOOLCHAINS_COMMIT (main)" \
