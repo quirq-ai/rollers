@@ -26,8 +26,13 @@ def _warning(text: str, *, actions: bool) -> str:
 
 def _promoted(args):
     """Promotions from --promoted-json (qqtc's output, made elsewhere) or by running qqtc in --toolchains."""
+    import os
+
     from qqroll import promoted
 
+    if args.toolchains and os.environ.get("QQ_ROLLER_TOKEN"):
+        raise promoted.PromotedError("with QQ_ROLLER_TOKEN set, pass --promoted-json: qqtc must not run in a "
+                                     "process that holds the bot token")
     if args.promoted_json:
         with open(args.promoted_json, encoding="utf-8") as f:
             return promoted.parse_json(f.read(), args.promoted_json)
@@ -112,9 +117,9 @@ def cmd_rotation(args) -> int:
         print("qqroll: --apply needs QQ_ROLLER_TOKEN, the quirq infra bot's token. PRs opened with a "
               "workflow's GITHUB_TOKEN trigger no workflows, so they would never be gated.", file=sys.stderr)
         return 1
-    if args.apply and args.toolchains:
-        print("qqroll: --apply needs --promoted-json: qqtc must not run in a process that holds the bot "
-              "token (a child process can read its parent's environment)", file=sys.stderr)
+    if token and args.toolchains:
+        print("qqroll: with QQ_ROLLER_TOKEN set, pass --promoted-json: qqtc must not run in a process that "
+              "holds the bot token (a child process can read its parent's environment)", file=sys.stderr)
         return 1
     try:
         cfg = load(args.infra_config)
@@ -134,6 +139,25 @@ def cmd_rotation(args) -> int:
     for w in report.warnings:
         print(_warning(w, actions=os.environ.get("GITHUB_ACTIONS") == "true"), file=sys.stderr)
     return 1 if report.failed else 0
+
+
+def cmd_repos(args) -> int:
+    """The repos the toolchains roller covers, comma-separated: the bot token is scoped to exactly these."""
+    from qqroll import rotation
+    from qqroll.config import ConfigError, load, rollers
+
+    try:
+        cfg = load(args.infra_config)
+    except ConfigError as e:
+        print(f"qqroll: {e}", file=sys.stderr)
+        return 1
+    repos = sorted({repo for r in rollers(cfg) if r["tool"] == "quirq-rollers" and r["name"] == rotation.ROLLER
+                    for repo in r["repos"]})
+    if not repos:
+        print(f"qqroll: rollers.toml has no quirq-rollers roller named {rotation.ROLLER!r}", file=sys.stderr)
+        return 1
+    print(",".join(repos))
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -174,6 +198,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--auto-merge", action="store_true",
                    help="turn on auto-merge so a roll lands once the gate passes (default: stop at the PR)")
     p.set_defaults(func=cmd_rotation)
+
+    p = sub.add_parser("repos", help="the repos the toolchains roller covers, comma-separated")
+    p.add_argument("--infra-config", required=True, help="path to a quirq-ai/infra-config checkout")
+    p.set_defaults(func=cmd_repos)
     return parser
 
 

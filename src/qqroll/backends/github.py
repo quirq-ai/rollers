@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import urllib.error
@@ -29,11 +30,20 @@ def _urllib_request(method: str, url: str, headers: dict, body: bytes | None) ->
         return e.code, e.read()
 
 
+# The only variables oras and gh get: never the bot token (QQ_ROLLER_TOKEN), which neither needs.
+_TOOL_ENV = ("PATH", "HOME", "GH_TOKEN", "DOCKER_CONFIG", "XDG_CONFIG_HOME", "TMPDIR",
+             "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "SSL_CERT_FILE", "GH_HOST")
+
+
+def _tool_env() -> dict[str, str]:
+    return {k: v for k, v in os.environ.items() if k in _TOOL_ENV}
+
+
 def _run(argv: list[str]) -> tuple[int, bytes, str]:
     if shutil.which(argv[0]) is None:
         return 127, b"", f"{argv[0]} is not installed"
     try:
-        proc = subprocess.run(argv, capture_output=True, timeout=120)
+        proc = subprocess.run(argv, capture_output=True, timeout=120, env=_tool_env())
     except (OSError, subprocess.TimeoutExpired) as e:
         return 1, b"", str(e)
     return proc.returncode, proc.stdout, proc.stderr.decode(errors="replace").strip()

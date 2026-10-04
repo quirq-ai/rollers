@@ -307,10 +307,20 @@ def test_cli_apply_refuses_to_run_qqtc_itself(monkeypatch, capsys, tmp_path):
     monkeypatch.setenv("QQ_ROLLER_TOKEN", "t")
     args = ["rotation", "--infra-config", str(tmp_path), "--toolchains", str(tmp_path), "--apply"]
     assert main(args) == 1
-    assert "--apply needs --promoted-json" in capsys.readouterr().err
+    assert "pass --promoted-json" in capsys.readouterr().err
+    assert main(args[:-1]) == 1   # a dry run too: the token is in the environment either way
+    assert "pass --promoted-json" in capsys.readouterr().err
 
 
 def test_from_entry_needs_strings():
     from qqroll import promoted as pm
     with pytest.raises(pm.PromotedError, match="built_from is not a string"):
         pm.from_entry(entry(built_from=int("1" * 40)))
+
+
+def test_tools_never_see_the_bot_token(monkeypatch):
+    from qqroll.backends import github
+    monkeypatch.setenv("QQ_ROLLER_TOKEN", "secret")
+    monkeypatch.setenv("GH_TOKEN", "read")
+    env = github._tool_env()
+    assert "QQ_ROLLER_TOKEN" not in env and env["GH_TOKEN"] == "read" and "PATH" in env
