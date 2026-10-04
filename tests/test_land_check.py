@@ -631,3 +631,14 @@ def test_deeply_nested_values_are_refused_not_crashed():
     deep = "[" * 3000 + "x" + "]" * 3000
     with pytest.raises(ValueError):
         land_check._flow(deep)
+
+
+def test_an_optional_importer_entry_may_have_optional_snapshots():
+    """Round 3 of the #14 review: pnpm marks the closure of an importer's optionalDependencies optional."""
+    def optional(lock):
+        return lock.replace("    dependencies:\n      next:", "    optionalDependencies:\n      next:", 1)
+    head = optional(LOCK_HEAD).replace("  client-only@0.0.1: {}", "  client-only@0.0.1:\n    optional: true")
+    assert lock_check(head, base=optional(LOCK_BASE)) == []
+    assert any("marked optional" in p for p in lock_check(head.replace("optionalDependencies:\n      next:",
+                                                                         "dependencies:\n      next:", 1),
+                                                            base=LOCK_BASE))

@@ -18,7 +18,7 @@
 # TODO(expert): merges made with GITHUB_TOKEN do not trigger push workflows (post-submit); switch to
 # the quirq rollers App's token once it exists. Dependabot PRs only see Dependabot secrets.
 # TODO(expert): once owner review is required (V0-GAT-03), decide with gate how dependency-roll skips it.
-# qq-digest: sha256:1fe315a36a126f716597c97ff55af12d257cda5848322bdbeb653adfbc13d5b6
+# qq-digest: sha256:639c2843f11e775ffc9544aef5686f66e41db96bad436e33a22de9a26155c4a3
 name: qq-roll-land
 on:
   pull_request:
@@ -621,7 +621,9 @@ jobs:
               starts = [_target(path[3], value) for path, value in new.items()
                         if len(path) == 5 and path[0] == "importers" and path[4] == "version" and value]
               seen = _walk(new_s, [r for r in roots if r in new_s])
-              required = _walk(new_s, starts, required_only=True)
+              required = _walk(new_s, [_target(path[3], value) for path, value in new.items()
+                                       if len(path) == 5 and path[0] == "importers" and path[2] != "optionalDependencies"
+                                       and path[4] == "version" and value], required_only=True)
               reached = {_package_of(k) for k in seen} - {None}
               unreachable = {k for k in added_p if k not in reached} | {k for k in added_s if k not in seen}
               for key in sorted(unreachable):

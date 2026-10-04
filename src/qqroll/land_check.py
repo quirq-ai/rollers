@@ -557,7 +557,9 @@ def tree_problems(shown, old, new, dep, prev, new_version, roots, registry):
     starts = [_target(path[3], value) for path, value in new.items()
               if len(path) == 5 and path[0] == "importers" and path[4] == "version" and value]
     seen = _walk(new_s, [r for r in roots if r in new_s])
-    required = _walk(new_s, starts, required_only=True)
+    required = _walk(new_s, [_target(path[3], value) for path, value in new.items()
+                             if len(path) == 5 and path[0] == "importers" and path[2] != "optionalDependencies"
+                             and path[4] == "version" and value], required_only=True)
     reached = {_package_of(k) for k in seen} - {None}
     unreachable = {k for k in added_p if k not in reached} | {k for k in added_s if k not in seen}
     for key in sorted(unreachable):
