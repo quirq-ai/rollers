@@ -91,7 +91,10 @@ def test_generated_step_runs_the_check(tmp_path):
         "        self.url = url\n"
         "    def geturl(self):\n"
         "        return self.url\n"
-        "urllib.request.urlopen = lambda req, timeout=None: Answer(req.full_url.replace('%40', '@'))\n"
+        "class Opener:\n"
+        "    def open(self, req, timeout=None):\n"
+        "        return Answer(req.full_url.replace('%40', '@'))\n"
+        "urllib.request.build_opener = lambda *handlers: Opener()\n"
         "exec(compile(sys.stdin.read(), 'land_check', 'exec'), {'__name__': '__main__'})\n")
     (bindir / "python3").chmod(0o755)
 

@@ -265,21 +265,28 @@ def lock_problems(shown, base, head, dep, prev, new_version, registry=None):
         if registry is None:
             out.append(f"{shown}: the resolved tree changed and the registry was not consulted")
         else:
-            out += tree_problems(shown, old, new, dep, roots, registry)
+            out += tree_problems(shown, old, new, dep, prev, new_version, roots, registry)
     return out[:10]
 
 
 # --- the resolved tree (ROL-R6) -----------------------------------------------------------------
 # A roll may change the packages and snapshots sections only by the bumped dependency's new transitive
-# closure: entries already there stay byte for byte; every added package is the registry's own (its
-# integrity is the registry's dist.integrity, and nothing but that integrity says where it comes from);
-# every added or changed snapshot's edges are dependencies its registry manifest declares, resolved to
-# versions its declared ranges allow; an existing snapshot may change only its edge to the bumped
-# dependency; and every added entry is reachable from an importer entry the roll changed. Anything this
-# cannot verify (an unreadable range, a registry error, an alias or a non-registry edge) is refused.
+# closure. Entries already there stay byte for byte, except an existing snapshot's edge to the bumped
+# dependency, which may move only from the previous to the new version. Every added package is the
+# registry's own: its integrity is the registry's dist.integrity, nothing else says where it comes from,
+# and every other field it has (engines, os, cpu, libc, hasBin, deprecated, peers, bundled dependencies)
+# is what pnpm writes from the registry manifest. Every added or changed snapshot's edges are dependencies
+# its registry manifest declares, of the same kind (optional or not), at versions its ranges allow; it is
+# marked optional only if it is reached through an optional edge. Every added entry is reachable from an
+# importer entry the roll changed, and nothing removed is still reachable from any importer. Anything
+# this cannot verify (an unreadable range, a registry error, an alias, a non-registry edge, more added
+# entries than MAX_ADDED) is refused.
+# Not checked: which in-range version a new transitive edge picks. pnpm picks the newest, but a lockfile
+# may pin any version the range allows; every such version is registry code its dependent accepts.
 PACKAGE_FIELDS = {"resolution", "engines", "cpu", "os", "libc", "hasBin", "deprecated", "peerDependencies",
                   "peerDependenciesMeta", "bundledDependencies"}
 SNAPSHOT_FIELDS = {"dependencies", "optionalDependencies", "transitivePeerDependencies", "optional"}
+MAX_ADDED = 400  # added packages plus snapshots; each costs a registry request
 _PKG_NAME = r"(?:@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*"
 _PKG_KEY = re.compile(r"(" + _PKG_NAME + r")@(" + _VERSION + r")")
 _SNAPSHOT_KEY = re.compile(r"(" + _PKG_NAME + r")@(" + _VERSION + r")(\(.*\))?")
@@ -314,7 +321,8 @@ def _cmp(a, b):
 
 def _partial(v):
     """A range operand, 1, 1.2, 1.2.x or 1.2.3-pre: (numbers given, prerelease), or None."""
-    m = re.fullmatch(r"v?(?:([0-9]+|[xX*])(?:\.([0-9]+|[xX*]))?(?:\.([0-9]+|[xX*]))?)(?:-([0-9A-Za-z.-]+))?"
+    n = r"(0|[1-9][0-9]*|[xX*])"
+    m = re.fullmatch(r"v?(?:" + n + r"(?:\." + n + r")?(?:\." + n + r")?)(?:-([0-9A-Za-z.-]+))?"
                      r"(?:\+[0-9A-Za-z.-]+)?", v)
     if not m:
         return None
@@ -403,25 +411,176 @@ def _odd_entry(entry):
     return entry.get(()) not in (None, "{}") or (entry.get(()) == "{}" and len(entry) > 1)
 
 
-def tree_problems(shown, old, new, dep, roots, registry):
+def _flow(text):
+    """pnpm's flow values ({k: v, ...}, [a, ...], 'quoted' and plain scalars) as dicts, lists and
+    strings. Raises ValueError on anything else."""
+    text, pos = text.strip(), 0
+
+    def ws():
+        nonlocal pos
+        while text.startswith(" ", pos):
+            pos += 1
+
+    def value(stop):
+        nonlocal pos
+        ws()
+        for open_, close in (("{", "}"), ("[", "]")):
+            if text.startswith(open_, pos):
+                pos += 1
+                out = {} if open_ == "{" else []
+                ws()
+                if text.startswith(close, pos):
+                    pos += 1
+                    return out
+                while True:
+                    if open_ == "{":
+                        key = value(":")
+                        if not text.startswith(": ", pos) or key in out:
+                            raise ValueError("not a flow mapping")
+                        pos += 1
+                        out[key] = value(",}")
+                    else:
+                        out.append(value(",]"))
+                    ws()
+                    if text.startswith(close, pos):
+                        pos += 1
+                        return out
+                    if not text.startswith(",", pos):
+                        raise ValueError("not a flow collection")
+                    pos += 1
+        if text.startswith("'", pos):
+            m = re.compile(r"'((?:[^']|'')*)'").match(text, pos)
+            if not m:
+                raise ValueError("unterminated quote")
+            pos = m.end()
+            return m[1].replace("''", "'")
+        start = pos
+        while pos < len(text) and text[pos] not in stop:
+            pos += 1
+        if not text[start:pos].strip():
+            raise ValueError("empty value")
+        return text[start:pos].strip()
+
+    out = value("")
+    if pos != len(text):
+        raise ValueError("trailing text")
+    return out
+
+
+def _package_fields(entry):
+    """An added package entry's fields other than resolution, as pnpm-written values."""
+    out = {}
+    for path, value in entry.items():
+        if not path or path[0] == "resolution" or value is None:
+            continue
+        if path[0] == "bundledDependencies" and path[1:] == ("-",):
+            out[path[0]] = [_flow(line) for line in value.splitlines()]
+        elif len(path) == 1:
+            out[path[0]] = _flow(value)
+        else:
+            out.setdefault(path[0], {})
+            node = out[path[0]]
+            for part in path[1:-1]:
+                node = node.setdefault(part, {})
+            node[path[-1]] = _flow(value)
+    return out
+
+
+def _expected_fields(meta):
+    """What pnpm writes in a package entry for a registry manifest, beside resolution."""
+    out = {f: meta[f] for f in ("engines", "os", "cpu", "libc", "deprecated") if meta.get(f)}
+    if meta.get("bin") or (meta.get("directories") or {}).get("bin"):
+        out["hasBin"] = "true"
+    peers = dict(meta.get("peerDependencies") or {})
+    for name in meta.get("peerDependenciesMeta") or {}:  # an optional peer with no range is any version
+        peers.setdefault(name, "*")
+    if peers:
+        out["peerDependencies"] = peers
+    if meta.get("peerDependenciesMeta"):
+        out["peerDependenciesMeta"] = {n: {k: json.dumps(v) if isinstance(v, bool) else v for k, v in d.items()}
+                                       for n, d in meta["peerDependenciesMeta"].items()}
+    bundled = meta.get("bundleDependencies") or meta.get("bundledDependencies")
+    if bundled:
+        out["bundledDependencies"] = bundled
+    return out
+
+
+def _edges(entry):
+    """(kind, name, value) for a snapshot's plain edges; kind is dependencies or optionalDependencies."""
+    return [(path[0], path[1], value) for path, value in entry.items()
+            if len(path) == 2 and path[0] in ("dependencies", "optionalDependencies")]
+
+
+def _walk(snapshots, starts, required_only=False):
+    """Snapshot keys reachable from `starts` (following only non-optional edges if asked)."""
+    seen, todo = set(), list(starts)
+    while todo:
+        key = todo.pop()
+        if key in seen:
+            continue
+        seen.add(key)
+        for kind, name, value in _edges(snapshots.get(key, {})):
+            if not (required_only and kind == "optionalDependencies"):
+                todo.append(f"{name}@{value}")
+    return seen
+
+
+def _package_of(snapshot_key):
+    m = _SNAPSHOT_KEY.fullmatch(snapshot_key)
+    return f"{m[1]}@{m[2]}" if m else None
+
+
+def tree_problems(shown, old, new, dep, prev, new_version, roots, registry):
     """What the packages and snapshots sections change beyond `dep`'s new closure (see above).
     `old` and `new` are lock_leaves results; `roots` the snapshot keys of importer entries the roll
     changed; `registry(name, version)` returns that version's registry manifest or raises."""
     out = []
     old_p, new_p = _section(old, "packages"), _section(new, "packages")
     old_s, new_s = _section(old, "snapshots"), _section(new, "snapshots")
+    added_p = sorted(set(new_p) - set(old_p))
+    added_s = sorted(set(new_s) - set(old_s))
+    if len(added_p) + len(added_s) > MAX_ADDED:
+        return [f"{shown}: adds {len(added_p) + len(added_s)} lockfile entries, more than {MAX_ADDED} checked"]
+
+    # Reachability first, so nothing unreachable costs a registry request.
+    seen = _walk(new_s, [r for r in roots if r in new_s])
+    required = _walk(new_s, [r for r in roots if r in new_s], required_only=True)
+    reached = {_package_of(k) for k in seen} - {None}
+    unreachable = {k for k in added_p if k not in reached} | {k for k in added_s if k not in seen}
+    for key in sorted(unreachable):
+        out.append(f"{shown}: added entry {json.dumps(key)} is not in the bumped dependency's closure")
+
+    # Nothing removed may still be in use: walk from every importer entry of the new lockfile.
+    starts = [f"{path[3]}@{value}" for path, value in new.items()
+              if len(path) == 5 and path[0] == "importers" and path[4] == "version" and value]
+    in_use = _walk(new_s, starts)
+    for key in sorted(set(old_s) - set(new_s)):
+        if key in in_use:
+            out.append(f"{shown}: removes the snapshot {json.dumps(key)}, which is still in use")
+    in_use_p = {_package_of(k) for k in in_use}
+    for key in sorted(set(old_p) - set(new_p)):
+        if key in in_use_p:
+            out.append(f"{shown}: removes the package {json.dumps(key)}, which is still in use")
+
     manifests = {}
 
     def manifest(name, version):
         if (name, version) not in manifests:
-            manifests[(name, version)] = registry(name, version)
-        return manifests[(name, version)]
+            try:
+                manifests[(name, version)] = registry(name, version)
+            except Exception as e:
+                manifests[(name, version)] = e
+        found = manifests[(name, version)]
+        if isinstance(found, Exception):
+            raise found
+        return found
 
     for key in sorted(set(old_p) & set(new_p)):
         if old_p[key] != new_p[key]:
             out.append(f"{shown}: changes the existing package {json.dumps(key)}")
-    added_p = sorted(set(new_p) - set(old_p))
     for key in added_p:
+        if key in unreachable:
+            continue
         m = _PKG_KEY.fullmatch(key)
         fields = {path[0] for path in new_p[key] if path}
         resolution = _RESOLUTION.fullmatch(new_p[key].get(("resolution",)) or "")
@@ -429,15 +588,24 @@ def tree_problems(shown, old, new, dep, roots, registry):
             out.append(f"{shown}: added package {json.dumps(key)} is not a registry package entry")
             continue
         try:
-            integrity = (manifest(m[1], m[2]).get("dist") or {}).get("integrity")
+            meta = manifest(m[1], m[2])
         except Exception as e:
             out.append(f"{shown}: could not check {json.dumps(key)} against the registry ({type(e).__name__})")
             continue
-        if integrity != resolution[1]:
+        if (meta.get("dist") or {}).get("integrity") != resolution[1]:
             out.append(f"{shown}: added package {json.dumps(key)} does not have the registry's integrity")
+            continue
+        # pnpm may leave a field out (some versions drop libc), which only installs more; a field it
+        # writes must say what the registry says.
+        try:
+            expected = _expected_fields(meta)
+            same = all(expected.get(f) == v for f, v in _package_fields(new_p[key]).items())
+        except ValueError:
+            same = False
+        if not same:
+            out.append(f"{shown}: added package {json.dumps(key)} has fields its registry manifest does not")
 
-    changed_s = sorted(k for k in set(new_s) if k not in old_s or old_s[k] != new_s[k])
-    for key in changed_s:
+    for key in sorted(k for k in new_s if k not in unreachable and (k not in old_s or old_s[k] != new_s[k])):
         m = _SNAPSHOT_KEY.fullmatch(key)
         fields = {path[0] for path in new_s[key] if path}
         if not m or _odd_entry(new_s[key]) or not fields <= SNAPSHOT_FIELDS or f"{m[1]}@{m[2]}" not in new_p:
@@ -446,28 +614,44 @@ def tree_problems(shown, old, new, dep, roots, registry):
         if key in old_s:
             moved = {path for path in set(old_s[key]) | set(new_s[key])
                      if old_s[key].get(path) != new_s[key].get(path)}
+            was = {path: _split_version(old_s[key].get(path)) for path in moved}
+            now = {path: _split_version(new_s[key].get(path)) for path in moved}
             if any(len(path) != 2 or path[0] not in ("dependencies", "optionalDependencies") or path[1] != dep
+                   or not was[path] or not now[path] or was[path][0] != prev or now[path][0] != new_version
                    for path in moved):
-                out.append(f"{shown}: changes the existing snapshot {json.dumps(key)} beyond its edge to "
-                           f"{json.dumps(dep)}")
+                out.append(f"{shown}: changes the existing snapshot {json.dumps(key)} beyond moving its edge to "
+                           f"{json.dumps(dep)} from {json.dumps(prev)} to {json.dumps(new_version)}")
                 continue
+        elif new_s[key].get(("optional",)) is not None and (new_s[key][("optional",)] != "true" or key in required):
+            out.append(f"{shown}: snapshot {json.dumps(key)} is marked optional but is not an optional dependency")
+            continue
         try:
             meta = manifest(m[1], m[2])
         except Exception as e:
             out.append(f"{shown}: could not check {json.dumps(key)} against the registry ({type(e).__name__})")
             continue
-        declared = {}
-        for kind in ("dependencies", "optionalDependencies", "peerDependencies"):
-            for name, rng in (meta.get(kind) or {}).items():
-                declared.setdefault(name, []).append(rng)
-        for name in meta.get("peerDependenciesMeta") or {}:  # an optional peer with no range is any version
+        optional = meta.get("optionalDependencies") or {}
+        declared = {"dependencies": {}, "optionalDependencies": {}}
+        for name, rng in (meta.get("dependencies") or {}).items():
+            if name not in optional:  # npm also lists optional dependencies under dependencies
+                declared["dependencies"].setdefault(name, []).append(rng)
+        for name, rng in optional.items():
+            declared["optionalDependencies"].setdefault(name, []).append(rng)
+        for name, rng in (meta.get("peerDependencies") or {}).items():
+            declared["dependencies"].setdefault(name, []).append(rng)
+        for name, info in (meta.get("peerDependenciesMeta") or {}).items():
+            # An optional peer with no range is any version; pnpm lists a resolved optional peer under
+            # dependencies or optionalDependencies, depending on its version.
+            rng = (meta.get("peerDependencies") or {}).get(name, "*")
             if name not in (meta.get("peerDependencies") or {}):
-                declared.setdefault(name, []).append("*")
+                declared["dependencies"].setdefault(name, []).append(rng)
+            if (info or {}).get("optional") is True:
+                declared["optionalDependencies"].setdefault(name, []).append(rng)
         for path, value in new_s[key].items():
             if not path or path[0] not in ("dependencies", "optionalDependencies") or (len(path) == 1 and value is None):
                 continue
             target = _split_version(value) if len(path) == 2 else None
-            ranges = declared.get(path[-1], [])
+            ranges = declared[path[0]].get(path[-1], [])
             try:
                 fits = target and any(satisfies(target[0], r) for r in ranges)
             except ValueError:
@@ -475,25 +659,6 @@ def tree_problems(shown, old, new, dep, roots, registry):
             if not fits or f"{path[1]}@{value}" not in new_s:
                 out.append(f"{shown}: snapshot {json.dumps(key)} has an edge {json.dumps(path[-1])}: "
                            f"{json.dumps(value)} its registry manifest does not allow")
-
-    # Reachability: every added entry hangs off an importer entry the roll changed.
-    seen, todo = set(), [r for r in roots if r in new_s]
-    while todo:
-        key = todo.pop()
-        if key in seen:
-            continue
-        seen.add(key)
-        for path, value in new_s.get(key, {}).items():
-            if path and path[0] in ("dependencies", "optionalDependencies") and len(path) == 2:
-                todo.append(f"{path[1]}@{value}")
-    reached = {_SNAPSHOT_KEY.fullmatch(k)[1] + "@" + _SNAPSHOT_KEY.fullmatch(k)[2]
-               for k in seen if _SNAPSHOT_KEY.fullmatch(k)}
-    for key in added_p:
-        if key not in reached:
-            out.append(f"{shown}: added package {json.dumps(key)} is not in the bumped dependency's closure")
-    for key in sorted(set(new_s) - set(old_s)):
-        if key not in seen:
-            out.append(f"{shown}: added snapshot {json.dumps(key)} is not in the bumped dependency's closure")
     return out
 
 
@@ -634,8 +799,12 @@ def npm_registry(name, version):
     if not (re.fullmatch(_PKG_NAME, name) and re.fullmatch(_VERSION, version)):
         raise ValueError("not a package name and version")
     url = "https://registry.npmjs.org/" + urllib.parse.quote(name, safe="@") + "/" + urllib.parse.quote(version)
+    class NoRedirects(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            raise ValueError("the registry redirected")
+
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with urllib.request.build_opener(NoRedirects).open(req, timeout=30) as resp:
         if resp.geturl() != url:
             raise ValueError("the registry redirected")
         data = json.load(resp)

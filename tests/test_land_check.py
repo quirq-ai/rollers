@@ -190,7 +190,7 @@ def test_a_minor_bump_past_1_0_is_clean():
     def bump(prev, new, update):
         env = {"UPDATE_TYPE": f"version-update:semver-{update}", "PREV_VERSION": prev, "NEW_VERSION": new}
         base = LOCK_BASE.replace("16.3.7", prev)
-        same = {"dist": {"integrity": "sha512-old"}, "dependencies": {"styled-jsx": "5.1.6"}, "peerDependencies": NEXT_PEERS}
+        same = {**REGISTRY[("next", "16.3.7")], "dist": {"integrity": "sha512-old"}}
         table = {**REGISTRY, ("next", new): same}
         return check(env=env, locks={"pnpm-lock.yaml": (base, base.replace(prev, new))},
                      reg=lambda n, v: registry(n, v, table))
@@ -442,12 +442,12 @@ UNRELATED_EDGE = LOCK_HEAD.replace(   # a new registry package, wired into react
      'has an edge "client-only": "link:../evil"'),
     (LOCK_HEAD.replace("      client-only: 0.0.1\n", "      client-only: npm:evil@1.0.0\n"),
      'has an edge "client-only": "npm:evil@1.0.0"'),
-    (LOCK_HEAD.replace("      client-only: 0.0.1\n", ""), 'added package "client-only@0.0.1" is not in the bumped'),
+    (LOCK_HEAD.replace("      client-only: 0.0.1\n", ""), 'added entry "client-only@0.0.1" is not in the bumped'),
     (LOCK_HEAD.replace("  client-only@0.0.1: {}", "  client-only@0.0.1: {}\n\n  react@19.3.1: {}").replace(
         "  client-only@0.0.1:\n    resolution", "  react@19.3.1:\n    resolution: {integrity: sha512-react1}\n\n"
-        "  client-only@0.0.1:\n    resolution"), 'added package "react@19.3.1" is not in the bumped'),
+        "  client-only@0.0.1:\n    resolution"), 'added entry "react@19.3.1" is not in the bumped'),
     (LOCK_HEAD.replace("  client-only@0.0.1: {}", "  client-only@0.0.1: {}\n\n  'Evil@1.0.0': {}"),
-     'snapshot "Evil@1.0.0" is not a snapshot of a package'),
+     'added entry "Evil@1.0.0" is not in the bumped'),
 ])
 def test_tree_changes_beyond_the_bumps_closure_are_not_clean(head, why):
     found = lock_check(head)
@@ -472,9 +472,12 @@ def test_an_optional_peer_without_a_range_allows_any_version():
     peers = {"react": NEXT_PEERS["react"]}
     table = {**REGISTRY, ("next", "16.3.8"): dict(REGISTRY[("next", "16.3.8")], peerDependencies=peers,
                                                   peerDependenciesMeta={"@types/node": {"optional": True}})}
-    assert lock_check(LOCK_HEAD, reg=lambda n, v: registry(n, v, table)) == []
+    head = LOCK_HEAD.replace("      '@types/node': '>=18'\n      react: ^18.2.0 || ^19.0.0\n    bundledDependencies",
+                             "      '@types/node': '*'\n      react: ^18.2.0 || ^19.0.0\n    peerDependenciesMeta:\n"
+                             "      '@types/node':\n        optional: true\n    bundledDependencies")
+    assert lock_check(head, reg=lambda n, v: registry(n, v, table)) == []
     table[("next", "16.3.8")] = dict(table[("next", "16.3.8")], peerDependenciesMeta={})
-    assert any('has an edge "@types/node"' in p for p in lock_check(LOCK_HEAD, reg=lambda n, v: registry(n, v, table)))
+    assert any('has an edge "@types/node"' in p for p in lock_check(head, reg=lambda n, v: registry(n, v, table)))
 
 
 def test_the_tree_is_refused_when_the_registry_cannot_be_consulted():
@@ -516,5 +519,89 @@ def test_satisfies_follows_npm(version, rng, ok):
 @pytest.mark.parametrize("rng", ["latest", "npm:evil@1.0.0", "github:a/b", "file:../x", "https://x/y.tgz",
                                  "1.2.3-", ">=1.2-beta"])
 def test_satisfies_refuses_what_it_cannot_read(rng):
+    with pytest.raises(ValueError):
+        land_check.satisfies("1.2.3", rng)
+
+
+# --- ROL-R6 review: fields, optional flags, removals, moved edges, cost -------------------------
+
+@pytest.mark.parametrize("edit, why", [
+    (("{integrity: sha512-clientonly}", "{integrity: sha512-clientonly}\n    os: [aix]"), "has fields"),
+    (("{integrity: sha512-clientonly}", "{integrity: sha512-clientonly}\n    cpu: [s390x]"), "has fields"),
+    (("{integrity: sha512-clientonly}", "{integrity: sha512-clientonly}\n    engines: {node: '>=99'}"), "has fields"),
+    (("{integrity: sha512-clientonly}", "{integrity: sha512-clientonly}\n    hasBin: true"), "has fields"),
+    (("{integrity: sha512-clientonly}", "{integrity: sha512-clientonly}\n    deprecated: x"), "has fields"),
+    (("{integrity: sha512-clientonly}", "{integrity: sha512-clientonly}\n    peerDependencies:\n      evil: '*'"),
+     "has fields"),
+    (("engines: {node: '>=20.9.0'}\n    hasBin", "engines: {node: '>=99'}\n    hasBin"), "has fields"),
+    (("      - a\n", "      - a\n      - b\n"), "has fields"),
+    (("  client-only@0.0.1: {}", "  client-only@0.0.1:\n    optional: true"), "marked optional"),
+    (("      client-only: 0.0.1\n      react", "      react"), "is not in the bumped"),
+])
+def test_added_entries_say_what_the_registry_says(edit, why):
+    head = LOCK_HEAD.replace(*edit, 1)
+    assert head != LOCK_HEAD
+    found = lock_check(head)
+    assert any(why in p for p in found), found
+
+
+def test_an_edge_must_keep_its_kind():
+    head = LOCK_HEAD.replace("      client-only: 0.0.1\n      react: 19.3.0\n      styled-jsx: 5.1.6(react@19.3.0)\n",
+                             "      react: 19.3.0\n      styled-jsx: 5.1.6(react@19.3.0)\n"
+                             "    optionalDependencies:\n      client-only: 0.0.1\n", 1)
+    assert head != LOCK_HEAD
+    assert any('has an edge "client-only"' in p for p in lock_check(head))
+
+
+def test_a_removed_entry_still_in_use_is_not_clean():
+    head = LOCK_HEAD.replace("  react@19.3.0:\n    resolution: {integrity: sha512-react}\n    engines: {node: '>=0.10.0'}\n\n",
+                             "").replace("  react@19.3.0: {}\n\n", "")
+    found = lock_check(head)
+    assert any('removes the package "react@19.3.0"' in p for p in found), found
+    assert any('removes the snapshot "react@19.3.0"' in p for p in found), found
+
+
+REACT_ENV = {"DEP_NAMES": "react", "PREV_VERSION": "19.3.0", "NEW_VERSION": "19.3.1"}
+USER = "\n  user@1.0.0:\n    resolution: {integrity: sha512-user}\n"
+USER_SNAP = "\n  user@1.0.0:\n    dependencies:\n      react: {}\n"
+
+
+def react_bump(base):
+    return base.replace("react@19.3.0", "react@19.3.1").replace("react: 19.3.0", "react: 19.3.1").replace(
+        "specifier: ^19.3.0\n        version: 19.3.0", "specifier: ^19.3.1\n        version: 19.3.1").replace(
+        "sha512-react}", "sha512-react1}")
+
+
+@pytest.mark.parametrize("edge, ok", [("19.3.1", True), ("19.3.0", False), ("99.0.0", False), (None, False)])
+def test_an_existing_snapshot_moves_its_edge_only_to_the_new_version(edge, ok):
+    """Review of #14: an existing dependent's edge to the bumped package may not be downgraded or dropped."""
+    base = LOCK_BASE.replace("\nsnapshots:", USER + "\nsnapshots:") + USER_SNAP.format("19.3.0")
+    head = react_bump(base).replace("      react: 19.3.1\n", "" if edge is None else f"      react: {edge}\n")
+    head = head.replace("  user@1.0.0:\n    dependencies:\n\n", "  user@1.0.0: {}\n") if edge is None else head
+    head = head if edge is None else head.replace(USER_SNAP.format("19.3.1"), USER_SNAP.format(edge))
+    table = {**REGISTRY, ("user", "1.0.0"): {"dist": {"integrity": "sha512-user"}, "dependencies": {"react": "*"}}}
+    found = lock_check(head, base=base, env={**REACT_ENV, "CHANGED": "1"},
+                       reg=lambda n, v: registry(n, v, table))
+    found = [p for p in found if "pnpm-lock" in p]
+    assert (found == []) is ok, found
+
+
+def test_registry_cost_is_bounded(monkeypatch):
+    monkeypatch.setattr(land_check, "MAX_ADDED", 1)
+    calls = []
+    assert any("more than 1 checked" in p for p in lock_check(LOCK_HEAD, reg=lambda n, v: calls.append(n)))
+    assert calls == []
+    monkeypatch.setattr(land_check, "MAX_ADDED", 400)
+
+    def down(name, version):
+        calls.append((name, version))
+        raise OSError("down")
+    lock_check(LOCK_HEAD.replace("      client-only: 0.0.1\n      react", "      react"), reg=down)
+    assert ("client-only", "0.0.1") not in calls          # unreachable: refused without asking the registry
+    assert len(calls) == len(set(calls))                    # a failed lookup is not repeated
+
+
+@pytest.mark.parametrize("rng", ["^01.2.3", "1.02.3", ">=1.2.03"])
+def test_satisfies_refuses_leading_zeros(rng):
     with pytest.raises(ValueError):
         land_check.satisfies("1.2.3", rng)

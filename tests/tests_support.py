@@ -74,16 +74,17 @@ LOCK_HEAD = LOCK_BASE.replace("16.3.7", "16.3.8").replace("sha512-old", "sha512-
     "      '@types/node': 26.6.4\n      client-only: 0.0.1\n      react: 19.3.0\n      styled-jsx").replace(
     "  react@19.3.0: {}", "  client-only@0.0.1: {}\n\n  react@19.3.0: {}")
 NEXT_PEERS = {"@types/node": ">=18", "react": "^18.2.0 || ^19.0.0"}
+NEXT_META = {"engines": {"node": ">=20.9.0"}, "bin": {"next": "dist/bin/next"}, "bundleDependencies": ["a"],
+             "peerDependencies": NEXT_PEERS}
+REACT_META = {"engines": {"node": ">=0.10.0"}}
 REGISTRY = {
-    ("next", "16.3.7"): {"dist": {"integrity": "sha512-old"}, "dependencies": {"styled-jsx": "5.1.6"},
-                         "peerDependencies": NEXT_PEERS},
+    ("next", "16.3.7"): {"dist": {"integrity": "sha512-old"}, "dependencies": {"styled-jsx": "5.1.6"}, **NEXT_META},
     ("next", "16.3.8"): {"dist": {"integrity": "sha512-new"},
-                         "dependencies": {"styled-jsx": "5.1.6", "client-only": "0.0.1"},
-                         "peerDependencies": NEXT_PEERS},
+                         "dependencies": {"styled-jsx": "5.1.6", "client-only": "0.0.1"}, **NEXT_META},
     ("client-only", "0.0.1"): {"dist": {"integrity": "sha512-clientonly"}},
     ("styled-jsx", "5.1.6"): {"dist": {"integrity": "sha512-styled"}, "peerDependencies": {"react": ">= 16.8.0"}},
-    ("react", "19.3.0"): {"dist": {"integrity": "sha512-react"}},
-    ("react", "19.3.1"): {"dist": {"integrity": "sha512-react1"}},
+    ("react", "19.3.0"): {"dist": {"integrity": "sha512-react"}, **REACT_META},
+    ("react", "19.3.1"): {"dist": {"integrity": "sha512-react1"}, **REACT_META},
     ("@types/node", "26.6.4"): {"dist": {"integrity": "sha512-typesnode"}},
     ("@types/node", "26.6.5"): {"dist": {"integrity": "sha512-typesnode5"}},
 }
@@ -98,22 +99,28 @@ def registry(name, version, table=None):
 
 
 def registry_from(lock):
-    """A fake registry that agrees with a lockfile: each package's integrity and peers, and its snapshot
-    edges as exact dependencies."""
+    """A fake registry that agrees with a lockfile: each package's integrity and other fields, and its
+    snapshot edges as exact dependencies of the same kind."""
     from qqroll import land_check
     leaves, table = land_check.lock_leaves(lock), {}
+    for key, entry in land_check._section(leaves, "packages").items():
+        name, _, version = key.rpartition("@")
+        meta = land_check._package_fields(entry)
+        if meta.pop("hasBin", None):
+            meta["bin"] = {name: "bin"}
+        if "bundledDependencies" in meta:
+            meta["bundleDependencies"] = meta.pop("bundledDependencies")
+        for d in meta.get("peerDependenciesMeta", {}).values():
+            d.update({k: v == "true" for k, v in d.items()})
+        meta["peerDependencies"] = {n: r for n, r in meta.get("peerDependencies", {}).items()
+                                    if not (r == "*" and n in meta.get("peerDependenciesMeta", {}))}
+        resolution = entry[("resolution",)]
+        table[(name, version)] = {"dist": {"integrity": resolution[len("{integrity: "):-1]}, "dependencies": {},
+                                  "optionalDependencies": {}, **meta}
     for path, value in leaves.items():
-        if path[0] == "packages" and len(path) == 3 and path[2] == "resolution":
-            name, _, version = path[1].rpartition("@")
-            table[(name, version)] = {"dist": {"integrity": value[len("{integrity: "):-1]}, "dependencies": {},
-                                      "peerDependencies": {}}
-    for path, value in leaves.items():
-        if path[0] == "packages" and len(path) == 4 and path[2] == "peerDependencies":
-            name, _, version = path[1].rpartition("@")
-            table[(name, version)]["peerDependencies"][path[3]] = value.strip("'")
         if path[0] == "snapshots" and len(path) == 4 and path[2] in ("dependencies", "optionalDependencies"):
-            name, _, rest = path[1].partition("(")[0].rpartition("@")
-            table[(name, rest)]["dependencies"][path[3]] = value.partition("(")[0]
+            name, _, version = path[1].partition("(")[0].rpartition("@")
+            table[(name, version)][path[2]][path[3]] = value.partition("(")[0]
     return lambda name, version: registry(name, version, table)
 
 

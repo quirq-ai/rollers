@@ -37,12 +37,16 @@ Every repo that a `tool = "dependabot"` roller covers gets two generated files, 
     markers), and registry-only lockfile entries.
   - `pnpm-lock.yaml` moves only that dependency. In `importers` and `settings` only its specifier and
     version change (and its version inside other entries' peer suffixes). In `packages` and `snapshots`
-    existing entries stay byte for byte, except an existing snapshot's edge to the bumped dependency;
-    every added package's integrity is the one registry.npmjs.org publishes for it, with no tarball or
-    other source; every added or changed snapshot's edges are dependencies its registry manifest
-    declares, at versions its ranges allow; and every added entry is reachable from the bumped
-    dependency. Anything it cannot verify (a registry error, an alias, a range form it does not read)
-    is not clean.
+    existing entries stay byte for byte, except that an existing snapshot's edge to the bumped
+    dependency moves from the previous to the new version; every added package's integrity is the one
+    registry.npmjs.org publishes for it, with no tarball or other source, and its other fields (engines,
+    os, cpu, libc, bins, peers, bundled dependencies) say what the registry manifest says; every added
+    or changed snapshot's edges are dependencies its registry manifest declares, of the same kind, at
+    versions its ranges allow, and it is marked optional only when reached through an optional edge;
+    every added entry is reachable from the bumped dependency; and nothing removed is still in use.
+    Anything it cannot verify (a registry error, an alias, a range form it does not read, more than 400
+    added entries) is not clean. Not checked: which in-range version a new transitive dependency
+    resolves to (pnpm picks the newest; a lockfile may pin any version its dependent accepts).
   - It bumps one dependency by a patch or minor version. Below 1.0 a minor bump counts as major, below
     0.1 a patch bump does too, and an unknown previous version counts as 0.x.
   - The base branch has a gate a workflow cannot fake: a required workflow (ruleset) pinned by sha, or
