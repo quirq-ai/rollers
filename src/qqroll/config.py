@@ -9,8 +9,8 @@ class ConfigError(Exception):
     pass
 
 
-def load_rollers(infra_config: str | Path) -> list[dict]:
-    """The `[[roller]]` entries of infra-config's `config/rollers.toml`, read with `qqcfg.load`."""
+def load(infra_config: str | Path) -> dict:
+    """Every infra-config area, read with infra-config's `qqcfg.load`."""
     root = Path(infra_config)
     tool = root / "tools" / "qqcfg.py"
     if not tool.is_file():
@@ -19,13 +19,26 @@ def load_rollers(infra_config: str | Path) -> list[dict]:
     qqcfg = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(qqcfg)
     try:
-        cfg = qqcfg.load(root)
+        return qqcfg.load(root)
     except qqcfg.ConfigError as e:
         raise ConfigError(str(e)) from None
-    rollers = cfg.get("rollers", {}).get("roller")
-    if not rollers:
-        raise ConfigError(f"{root}: config/rollers.toml has no [[roller]] entries")
-    return rollers
+
+
+def rollers(cfg: dict, source: str = "infra-config") -> list[dict]:
+    """The `[[roller]]` entries of config/rollers.toml."""
+    entries = cfg.get("rollers", {}).get("roller")
+    if not entries:
+        raise ConfigError(f"{source}: config/rollers.toml has no [[roller]] entries")
+    return entries
+
+
+def load_rollers(infra_config: str | Path) -> list[dict]:
+    return rollers(load(infra_config), str(infra_config))
+
+
+def toolchain_pins(cfg: dict) -> dict[str, str]:
+    """The org-wide pin of each toolchain in config/kinds.toml, e.g. {"python": "3.14"}."""
+    return {t["name"]: str(t["pin"]) for t in cfg.get("kinds", {}).get("toolchain", []) if "pin" in t}
 
 
 def rollers_for(rollers: list[dict], repo: str, tool: str) -> list[dict]:

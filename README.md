@@ -25,10 +25,11 @@ Every repo that a `tool = "dependabot"` roller covers gets two generated files, 
 
 - `.github/dependabot.yml`: one update per roller, with its ecosystem, directory, cadence and open limit.
 - `.github/workflows/qq-roll-land.yml`: lands a clean Dependabot PR with no human. Clean means only
-  dependency files changed (requirements files for pip; `package.json` and `pnpm-lock.yaml` for npm),
-  only Dependabot pushed, and the bump is not a major version. The workflow turns on auto-merge, so
-  GitHub merges the PR only once the required checks pass: the roll goes through the same gate as any
-  change. Anything else has auto-merge turned off and waits for a human.
+  dependency files changed, at the roller's directory (requirements files and `pyproject.toml` for pip;
+  `package.json`, `pnpm-lock.yaml` and `pnpm-workspace.yaml` for npm), every commit is Dependabot's
+  and verified, and the bump is not a major version. The workflow turns on auto-merge, so GitHub merges
+  the PR only once the required checks pass: the roll goes through the same gate as any change.
+  Anything else, including any failed step, turns auto-merge off and leaves the PR to a human.
 
 ```sh
 qqroll dependabot --infra-config ../infra-config --write   # regenerate generated/
@@ -38,7 +39,8 @@ qqroll dependabot --infra-config ../infra-config           # check: exit 1 if st
 The infra-config commit the files come from is pinned in `infra-config.commit` and recorded in each
 file's header. Admin steps the land workflow needs in each repo: "Allow auto-merge", and a ruleset
 that requires the gate check on `main` (V0-ORG-03). xo-space has no Python lockfile yet, so its pip
-rolls only move `requirements*.txt` (`TODO(expert)` in `rollers.toml`).
+rolls only move `requirements*.txt` floors, and may open no PR at all (`TODO(expert)` in
+`rollers.toml`); the done-when is shown on innernet first.
 
 ## Develop
 

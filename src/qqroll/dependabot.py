@@ -16,7 +16,8 @@ from pathlib import Path
 
 from qqroll.config import rollers_for
 
-BACKEND = "github"  # TODO(expert): a launchpad backend when quirq's own cloud has a dependency updater.
+BACKENDS = {"github"}  # TODO(expert): launchpad, when quirq's own cloud has a dependency updater.
+FETCH_METADATA = "25dd0e34f4fe68f24cc83900b1fe3fe149efef98  # v3.1.0"
 
 # rollers.toml cadence -> Dependabot schedule.interval.
 INTERVALS = {"daily": "daily", "weekly": "weekly"}
@@ -26,7 +27,7 @@ INTERVALS = {"daily": "daily", "weekly": "weekly"}
 # anything else is not a dependency roll (gate.toml change_class "dependency-roll") and waits for a human.
 DEPENDENCY_FILES = {
     "pip": ["requirements*.txt", "pyproject.toml"],
-    "npm": ["package.json", "pnpm-lock.yaml"],
+    "npm": ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"],  # workspace: pnpm catalogs
 }
 
 HEADER = """\
@@ -83,14 +84,15 @@ def _patterns(rollers: list[dict], repo: str) -> list[str]:
 
 
 LAND_WORKFLOW = """\
-{header}# Lands a clean Dependabot roll with no human (D4): only dependency files changed, pushed only by
-# Dependabot, and not a major version bump. Auto-merge means GitHub merges it only after the
-# required checks pass, so the roll goes through the same gate as any change. Anything else has
-# auto-merge turned off and waits for a human.
+{header}# Lands a clean Dependabot roll with no human (D4). Clean means: only dependency files changed,
+# every commit is Dependabot's and verified, and the bump is not a major version. Auto-merge means
+# GitHub merges it only after the required checks pass, so the roll goes through the same gate as
+# any change. Anything else, including any failed step, turns auto-merge off and waits for a human.
 # Needs, set by an admin: "Allow auto-merge" in the repo settings, and a ruleset that requires the
 # gate check on main (V0-ORG-03). Without them auto-merge cannot be enabled and the PR stays open.
 # TODO(expert): merges made with GITHUB_TOKEN do not trigger push workflows (post-submit); switch to
 # the quirq infra bot's token once it exists. Dependabot PRs only see Dependabot secrets.
+# TODO(expert): check how `gh pr merge --auto` behaves once a merge queue is required (V0-ORG-03).
 # TODO(suraj): should agents also land major version bumps alone? Default: no, a human lands them.
 name: qq-roll-land
 on:
@@ -106,57 +108,84 @@ jobs:
     timeout-minutes: 5
     steps:
       - id: meta
-        uses: dependabot/fetch-metadata@v3
-      - name: only dependency files changed
+        uses: dependabot/fetch-metadata@{fetch_metadata}
+      - name: only dependency files, only Dependabot's commits
         id: clean
         env:
           GH_TOKEN: ${{{{ github.token }}}}
           PR: ${{{{ github.event.pull_request.number }}}}
-          ACTOR: ${{{{ github.actor }}}}
         run: |
+          # Patterns are JSON strings, compared with JSON-encoded filenames, so no name can break a
+          # line or a pattern apart. A pattern matches only at its own directory depth.
           allowed=({patterns})
+          files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[].filename | @json')
+          others=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/commits" \\
+            --jq '.[] | select(.author.login != "dependabot[bot]" or .commit.verification.verified != true) | .sha')
           clean=true
-          # A push by anyone else to a Dependabot branch makes the PR a human change.
-          if [ "$ACTOR" != 'dependabot[bot]' ]; then echo "pushed by $ACTOR, not Dependabot"; clean=false; fi
+          if [ -z "$files" ]; then echo "no changed files listed"; clean=false; fi
+          if [ -n "$others" ]; then echo "commits not by Dependabot or unverified: $others"; clean=false; fi
           while IFS= read -r f; do
+            [ -z "$f" ] && continue
             ok=false
-            for p in "${{allowed[@]}}"; do [[ "$f" == $p ]] && ok=true; done
-            if [ "$ok" = false ]; then echo "not a dependency file: $f"; clean=false; fi
-          done < <(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[].filename')
+            for p in "${{allowed[@]}}"; do
+              [[ "$f" == $p && "${{f//[^\/]/}}" == "${{p//[^\/]/}}" ]] && ok=true
+            done
+            if [ "$ok" = false ]; then printf 'not a dependency file: %s\\n' "$f"; clean=false; fi
+          done <<< "$files"
           echo "clean=$clean" >> "$GITHUB_OUTPUT"
       - name: land through the gate
+        id: land
         if: steps.clean.outputs.clean == 'true' && steps.meta.outputs.update-type != 'version-update:semver-major'
         env:
           GH_TOKEN: ${{{{ github.token }}}}
           PR_URL: ${{{{ github.event.pull_request.html_url }}}}
         run: gh pr merge --auto --squash "$PR_URL"  # TODO(suraj): squash or merge commits (plan §10.3)
       - name: leave anything else to a human
-        if: steps.clean.outputs.clean != 'true' || steps.meta.outputs.update-type == 'version-update:semver-major'
+        if: always() && steps.land.outcome != 'success'
         env:
           GH_TOKEN: ${{{{ github.token }}}}
           PR_URL: ${{{{ github.event.pull_request.html_url }}}}
         run: gh pr merge --disable-auto "$PR_URL" || true  # fails harmlessly when auto-merge is off
 """
 
-
-def land_workflow(rollers: list[dict], repo: str, commit: str, org: str = "quirq-ai") -> str:
-    patterns = " ".join(f"'{p}'" for p in _patterns(rollers, repo))
+def land_workflow(rollers: list[dict], repo: str, commit: str, slug: str | None = None) -> str:
+    slug = slug or f"quirq-ai/{repo}"
+    patterns = " ".join("'" + json.dumps(p) + "'" for p in _patterns(rollers, repo))
     return LAND_WORKFLOW.format(header=HEADER.format(commit=commit), patterns=patterns,
-                                repo_full="'" + f"{org}/{repo}" + "'")
+                                repo_full=f"'{slug}'", fetch_metadata=FETCH_METADATA)
 
 
-def generate(rollers: list[dict], commit: str) -> dict[str, str]:
-    """Every generated file, keyed by its path under `generated/`."""
+def generate(rollers: list[dict], commit: str, *, backend: str = "github",
+             slugs: dict[str, str] | None = None) -> dict[str, str]:
+    """Every generated file, keyed by its path under `generated/`.
+
+    `backend` is infra-config's org default_backend; `slugs` maps repo names to owner/name, from
+    infra-config repos.toml sources.
+    """
+    if backend not in BACKENDS:
+        raise GenerateError(f"backend {backend!r} has no dependency updater yet")
     repos = sorted({repo for r in rollers if r["tool"] == "dependabot" for repo in r["repos"]})
     files = {}
     for repo in repos:
-        base = f"{BACKEND}/{repo}/.github"
+        base = f"{backend}/{repo}/.github"
         files[f"{base}/dependabot.yml"] = dependabot_yml(rollers, repo, commit)
-        files[f"{base}/workflows/qq-roll-land.yml"] = land_workflow(rollers, repo, commit)
+        files[f"{base}/workflows/qq-roll-land.yml"] = land_workflow(rollers, repo, commit,
+                                                                    (slugs or {}).get(repo))
     return files
 
 
+def github_slugs(cfg: dict) -> dict[str, str]:
+    """owner/name for each repo in infra-config repos.toml whose source is on github.com."""
+    return {r["name"]: r["source"].removeprefix("github.com/") for r in cfg.get("repos", {}).get("repo", [])
+            if r.get("source", "").startswith("github.com/")}
+
+
 def write(out: Path, files: dict[str, str]) -> None:
+    """Write every file, and remove files under `out` that are no longer generated."""
+    if out.is_dir():
+        for path in [p for p in out.rglob("*") if p.is_file()]:
+            if path.relative_to(out).as_posix() not in files:
+                path.unlink()
     for rel, text in files.items():
         path = out / rel
         path.parent.mkdir(parents=True, exist_ok=True)

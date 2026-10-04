@@ -19,10 +19,13 @@ def _commit(args) -> str:
 
 def cmd_dependabot(args) -> int:
     from qqroll import dependabot
-    from qqroll.config import ConfigError, load_rollers
+    from qqroll.config import ConfigError, load, rollers
 
     try:
-        files = dependabot.generate(load_rollers(args.infra_config), _commit(args))
+        cfg = load(args.infra_config)
+        files = dependabot.generate(rollers(cfg, args.infra_config), _commit(args),
+                                    backend=cfg.get("org", {}).get("org", {}).get("default_backend", "github"),
+                                    slugs=dependabot.github_slugs(cfg))
     except (ConfigError, dependabot.GenerateError) as e:
         print(f"qqroll: {e}", file=sys.stderr)
         return 1

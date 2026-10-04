@@ -36,7 +36,7 @@ def test_one_file_pair_per_dependabot_repo():
         "github/xo-space/.github/workflows/qq-roll-land.yml",
     ]
     for text in files.values():
-        assert COMMIT in text.splitlines()[2]  # header records the infra-config commit
+        assert COMMIT in text.splitlines()[1]  # header records the infra-config commit
 
 
 def test_land_workflow_is_valid_and_scoped():
@@ -45,39 +45,88 @@ def test_land_workflow_is_valid_and_scoped():
     job = wf["jobs"]["land"]
     assert "dependabot[bot]" in job["if"] and "'quirq-ai/xo-space'" in job["if"]
     assert wf["permissions"] == {"contents": "write", "pull-requests": "write"}
+    assert job["steps"][0]["uses"] == "dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98"
     run = job["steps"][1]["run"]
-    assert "allowed=('pyproject.toml' 'requirements*.txt')" in run
+    assert """allowed=('"pyproject.toml"' '"requirements*.txt"')""" in run
     land = job["steps"][2]
     assert "semver-major" in land["if"] and land["run"].startswith('gh pr merge --auto --squash "$PR_URL"')
+    # Any failure before landing, or a skipped land, turns auto-merge off.
+    assert job["steps"][3]["if"] == "always() && steps.land.outcome != 'success'"
     assert job["steps"][3]["run"].startswith('gh pr merge --disable-auto "$PR_URL"')
 
 
-def test_land_workflow_clean_check_accepts_only_dependency_files(tmp_path):
-    """Run the generated shell check against file lists, with `gh` faked."""
-    text = dependabot.land_workflow(ROLLERS, "innernet", COMMIT)
+def test_land_workflow_uses_the_repos_slug():
+    text = dependabot.land_workflow(ROLLERS, "xo-space", COMMIT, "someone/xo-space")
+    assert "'someone/xo-space'" in yaml.safe_load(text)["jobs"]["land"]["if"]
+
+
+def _clean_check(tmp_path, repo):
+    """The generated shell check, runnable against fake `gh api` output."""
+    text = dependabot.land_workflow(ROLLERS, repo, COMMIT)
     script = yaml.safe_load(text)["jobs"]["land"]["steps"][1]["run"]
     bindir = tmp_path / "bin"
-    bindir.mkdir()
+    bindir.mkdir(exist_ok=True)
 
-    def clean(files, actor="dependabot[bot]"):
-        (bindir / "gh").write_text("#!/bin/sh\nprintf '%s\\n' " + " ".join(f"'{f}'" for f in files) + "\n")
+    def clean(files, bad_commits=(), gh_fails=False):
+        import json as _json
+        enc = "\n".join(_json.dumps(f) for f in files)
+        (tmp_path / "files").write_text(enc + ("\n" if enc else ""))
+        (tmp_path / "commits").write_text("".join(c + "\n" for c in bad_commits))
+        (bindir / "gh").write_text(
+            "#!/bin/sh\n" + ("exit 1\n" if gh_fails else "") +
+            f'case "$*" in *files*) cat {tmp_path}/files;; *commits*) cat {tmp_path}/commits;; esac\n')
         (bindir / "gh").chmod(0o755)
         out = tmp_path / "out"
         out.write_text("")
-        subprocess.run(["bash", "-c", script], check=True,
-                       env={"PATH": f"{bindir}:/usr/bin:/bin", "GITHUB_OUTPUT": str(out),
-                            "GITHUB_REPOSITORY": "quirq-ai/innernet", "PR": "1", "ACTOR": actor})
-        return out.read_text().strip()
+        proc = subprocess.run(["bash", "-e", "-c", script],
+                              env={"PATH": f"{bindir}:/usr/bin:/bin", "GITHUB_OUTPUT": str(out),
+                                   "GITHUB_REPOSITORY": f"quirq-ai/{repo}", "PR": "1"})
+        return out.read_text().strip() if proc.returncode == 0 else f"failed {proc.returncode}"
+    return clean
 
+
+def test_clean_check_accepts_only_dependency_files(tmp_path):
+    clean = _clean_check(tmp_path, "innernet")
     assert clean(["pnpm-lock.yaml", "package.json"]) == "clean=true"
     assert clean(["pnpm-lock.yaml", "scripts/postinstall.js"]) == "clean=false"
     assert clean(["app/package.json"]) == "clean=false"
-    assert clean(["pnpm-lock.yaml"], actor="someone") == "clean=false"
+    assert clean(["package.json\npnpm-lock.yaml"]) == "clean=false"  # one name with a newline
+    assert clean(['package.json"']) == "clean=false"
+
+
+def test_clean_check_globs_stay_in_their_directory(tmp_path):
+    clean = _clean_check(tmp_path, "xo-space")
+    assert clean(["requirements.txt", "requirements-dev.txt"]) == "clean=true"
+    assert clean(["requirements/x.txt"]) == "clean=false"
+    assert clean(["requirementsfoo/.github/workflows/a.txt"]) == "clean=false"
+
+
+def test_clean_check_needs_only_dependabot_commits(tmp_path):
+    clean = _clean_check(tmp_path, "innernet")
+    assert clean(["pnpm-lock.yaml"], bad_commits=["abc123"]) == "clean=false"
+
+
+def test_clean_check_fails_closed(tmp_path):
+    clean = _clean_check(tmp_path, "innernet")
+    assert clean([]) == "clean=false"                       # nothing listed
+    assert clean(["pnpm-lock.yaml"], gh_fails=True).startswith("failed")  # API error fails the step
 
 
 def test_nested_directory_prefixes_patterns():
     rollers = [dict(ROLLERS[1], directory="/web")]
-    assert dependabot._patterns(rollers, "innernet") == ["web/package.json", "web/pnpm-lock.yaml"]
+    assert dependabot._patterns(rollers, "innernet") == [
+        "web/package.json", "web/pnpm-lock.yaml", "web/pnpm-workspace.yaml"]
+
+
+def test_unknown_backend_is_an_error():
+    with pytest.raises(dependabot.GenerateError, match="launchpad"):
+        dependabot.generate(ROLLERS, COMMIT, backend="launchpad")
+
+
+def test_github_slugs_come_from_repos_toml():
+    cfg = {"repos": {"repo": [{"name": "xo-space", "source": "github.com/quirq-ai/xo-space"},
+                              {"name": "elsewhere", "source": "example.org/x"}]}}
+    assert dependabot.github_slugs(cfg) == {"xo-space": "quirq-ai/xo-space"}
 
 
 def test_unsupported_cadence_is_an_error():
@@ -100,6 +149,8 @@ def test_check_reports_missing_stale_and_extra(tmp_path):
     (tmp_path / "github/extra.yml").write_text("x")
     problems = dependabot.check(tmp_path, files)
     assert [p.split(": ")[1].split(";")[0] for p in problems] == ["stale", "not generated from rollers.toml"]
+    dependabot.write(tmp_path, files)  # rewrites the stale file and removes the extra one
+    assert dependabot.check(tmp_path, files) == []
 
 
 def fake_infra_config(root: Path, rollers_toml: str) -> Path:
