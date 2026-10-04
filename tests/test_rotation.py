@@ -307,7 +307,9 @@ def test_cli_apply_refuses_to_run_qqtc_itself(monkeypatch, capsys, tmp_path):
     monkeypatch.setenv("QQ_ROLLER_TOKEN", "t")
     args = ["rotation", "--infra-config", str(tmp_path), "--toolchains", str(tmp_path), "--apply"]
     assert main(args) == 1
-    assert "--apply needs --promoted-json" in capsys.readouterr().err
+    assert "pass --promoted-json" in capsys.readouterr().err
+    assert main(args[:-1]) == 1   # a dry run too: the token is in the environment either way
+    assert "pass --promoted-json" in capsys.readouterr().err
 
 
 def test_from_entry_needs_strings():

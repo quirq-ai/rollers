@@ -1,0 +1,3 @@
+# qqsync by commit, installed with --no-deps --no-build-isolation after roll.lock. Must match pyproject.toml
+# (tests/test_cli.py checks).
+qqsync @ git+https://github.com/quirq-ai/sync@c51e40205e26771cd88bfc02e0c7522b5ee8271d

@@ -108,6 +108,12 @@ workflow is a dry run. A branch that already holds the same roll is not pushed a
 checks read ghcr anonymously, so until the toolchain packages are public every roll fails closed. Auto-merge (`--auto-merge`) stays off until `toolchains` enforces review of
 promotions on its `main`, so for now a roll stops at an open PR.
 
+The roll job runs only pinned code: actions by commit sha, Python packages from
+`requirements/roll.lock` by hash (`--require-hashes --no-deps`) plus qqsync and qqroll by commit, all
+installed before the bot token is minted, and the checkout keeps no credentials. The token is scoped
+to exactly the repos the toolchains roller covers (`qqroll repos`). With `QQ_ROLLER_TOKEN` set,
+`qqroll` refuses `--toolchains` and takes only `--promoted-json`, so qqtc never runs beside the token.
+
 ## Develop
 
 ```sh

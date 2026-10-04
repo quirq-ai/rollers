@@ -37,7 +37,8 @@ jobs:
       entries: ${{ steps.read.outputs.entries }}
       commit: ${{ steps.read.outputs.commit }}
     steps:
-      - uses: actions/setup-python@v7
+      # No cache or artifact may cross from this job into the roll job: toolchains code runs here.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
       - name: read promoted.toml on toolchains main with its qqtc
@@ -55,12 +56,22 @@ jobs:
     env:
       HAS_BOT: ${{ secrets.QQ_BOT_CLIENT_ID != '' }}   # secrets are not readable in a step's `if`
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      # Everything this job runs is pinned (actions by sha, Python packages by hash or commit) and
+      # installed before the bot token exists; no credentials are left in the checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
-      - run: python -m pip install --quiet .
+      - name: install qqroll and its pinned dependencies
+        run: |
+          python -m pip install --quiet --require-hashes --no-deps -r requirements/roll.lock
+          python -m pip install --quiet --no-deps --no-build-isolation -r requirements/qqsync.txt
+          python -m pip install --quiet --no-deps --no-build-isolation .
+          python -m pip check
       - name: check out infra-config at the pinned commit
+        id: src
         env:
           ENTRIES: ${{ needs.promoted.outputs.entries }}
         run: |
@@ -68,16 +79,17 @@ jobs:
           git -C .qq/infra-config fetch -q --depth 1 https://github.com/quirq-ai/infra-config "$(cat infra-config.commit)"
           git -C .qq/infra-config checkout -q FETCH_HEAD
           printf '%s' "$ENTRIES" > "$RUNNER_TEMP/promoted.json"
+          echo "repos=$(qqroll repos --infra-config .qq/infra-config)" >> "$GITHUB_OUTPUT"
       - uses: oras-project/setup-oras@005458ad77f1c8facd38a094e4af2e69e5607ff4 # v2.0.2
       - name: bot token
         id: bot
         if: env.HAS_BOT == 'true'
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ secrets.QQ_BOT_CLIENT_ID }}
           private-key: ${{ secrets.QQ_BOT_PRIVATE_KEY }}
           owner: quirq-ai
-          repositories: xo-space,innernet   # the repos rollers.toml's toolchains roller covers
+          repositories: ${{ steps.src.outputs.repos }}   # exactly the repos rollers.toml's toolchains roller covers
           permission-contents: write
           permission-pull-requests: write
       - name: roll
