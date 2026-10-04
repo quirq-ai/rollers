@@ -294,13 +294,23 @@ _SNAPSHOT_KEY = re.compile(r"(" + _PKG_NAME + r")@(" + _VERSION + r")(\(.*\))?")
 _RESOLUTION = re.compile(r"\{integrity: (sha512-[A-Za-z0-9+/]+={0,2})\}")
 
 
+def _prerelease(text):
+    """A prerelease's identifiers, ("pre", 1), or None if one is empty or a number with a leading zero."""
+    if not text:
+        return ()
+    ids = text.split(".")
+    if any(not i or (i.isdigit() and len(i) > 1 and i[0] == "0") for i in ids):
+        return None
+    return tuple(int(i) if i.isdigit() else i for i in ids)
+
+
 def _semver(v):
     """1.2.3-pre.1+build as ((1, 2, 3), ("pre", 1)), or None. Build metadata is ignored, as npm does."""
     m = re.fullmatch(r"v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?",
                      v.strip())
-    if not m:
+    pre = _prerelease(m[4]) if m else None
+    if pre is None:
         return None
-    pre = tuple(int(x) if x.isdigit() else x for x in m[4].split(".")) if m[4] else ()
     return (int(m[1]), int(m[2]), int(m[3])), pre
 
 
@@ -332,15 +342,24 @@ def _partial(v):
         if part is None or part in "xX*":
             break
         nums.append(int(part))
-    pre = tuple(int(x) if x.isdigit() else x for x in m[4].split(".")) if m[4] else ()
-    if pre and len(nums) < 3:
+    pre = _prerelease(m[4])
+    if pre is None or (pre and len(nums) < 3):
         return None
     return nums, pre
 
 
 def _comparators(op, nums, pre):
-    """[(op, version)] for one operand, desugaring ^, ~ and partial versions as npm does."""
+    """[(op, version, named)] for one operand, desugaring ^, ~ and partial versions as npm does; `named`
+    says the range itself names that version's prerelease (not a bound added here)."""
     lo = (tuple(nums + [0] * (3 - len(nums))), pre)
+    return [(o, v, v is lo and bool(pre)) for o, v in _desugar(op, nums, lo)]
+
+
+def _desugar(op, nums, lo):
+    """_comparators without the `named` flag."""
+    if not nums:  # *, x or empty: > and < match nothing, everything else anything
+        return [("<", ((0, 0, 0), (0,)))] if op in (">", "<") else [(">=", lo)]
+
     def bump(i):
         n = nums[:i + 1]
         n[i] += 1
@@ -371,6 +390,7 @@ def satisfies(version, rng):
     v = _semver(version)
     if v is None:
         raise ValueError(f"not a version: {version!r}")
+    found = False
     for alt in rng.split("||"):
         alt = alt.strip()
         m = re.fullmatch(r"(\S+)\s+-\s+(\S+)", alt)
@@ -388,13 +408,15 @@ def satisfies(version, rng):
                     raise ValueError(f"not a range npm documents: {rng!r}")
                 comps += _comparators(m[1] or "", *operand)
         ok = all({"=": c == 0, ">": c > 0, ">=": c >= 0, "<": c < 0, "<=": c <= 0}[op]
-                 for op, cv in comps for c in [_cmp(v, cv)])
+                 for op, cv, _ in comps for c in [_cmp(v, cv)])
         # A prerelease satisfies a range only if a comparator names a prerelease of the same version.
-        if ok and v[1] and not any(cv[1] and cv[1] != (0,) and cv[0] == v[0] for _, cv in comps):
+        if ok and v[1] and not any(named and cv[0] == v[0] for _, cv, named in comps):
             ok = False
-        if ok:
-            return True
-    return False
+        found = found or ok
+        # npm reads a range with an any-version alternative as plain *, which excludes prereleases.
+        if v[1] and all(c[:2] == (">=", ((0, 0, 0), ())) for c in comps):
+            return False
+    return found
 
 
 def _section(leaves, name):
@@ -436,6 +458,7 @@ def _flow(text):
                 ws()
                 if text.startswith(close, pos):
                     pos += 1
+                    depth -= 1
                     return out
                 while True:
                     if open_ == "{":
@@ -449,6 +472,7 @@ def _flow(text):
                     ws()
                     if text.startswith(close, pos):
                         pos += 1
+                        depth -= 1
                         return out
                     if not text.startswith(",", pos):
                         raise ValueError("not a flow collection")
@@ -668,7 +692,7 @@ def tree_problems(shown, old, new, dep, prev, new_version, roots, registry):
             ranges = declared[path[0]].get(path[-1], [])
             try:
                 fits = target and any(satisfies(target[0], r) for r in ranges)
-            except ValueError:
+            except Exception:  # a range this cannot read is refused, never a crash
                 fits = False
             if not fits or f"{path[1]}@{value}" not in new_s:
                 out.append(f"{shown}: snapshot {json.dumps(key)} has an edge {json.dumps(path[-1])}: "
