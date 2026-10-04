@@ -11,8 +11,11 @@
 # Roll PRs need the quirq infra bot (a GitHub App): PRs opened with this workflow's GITHUB_TOKEN would
 # trigger no workflows, so they would never be gated. Until the App's secrets exist, this runs as a
 # dry run and prints the diffs it would open.
-# TODO(suraj): create the quirq infra bot App (contents + pull requests write on the product repos)
-# and add its client id and private key as QQ_BOT_CLIENT_ID and QQ_BOT_PRIVATE_KEY.
+# TODO(suraj): create the quirq infra bot App, one App shared by rollers, gardener and test-pipelines,
+# installed on the product repos (xo-space, innernet) with contents, pull requests and actions write
+# (actions is for gardener's re-runs and backfill dispatches), and add its client id and private key
+# as QQ_BOT_CLIENT_ID and QQ_BOT_PRIVATE_KEY on each consuming repo. Each job mints its own
+# short-lived token scoped down to what it needs; this one uses contents and pull requests only.
 # TODO(expert): have toolchains' promote workflow send repository_dispatch (toolchain-promoted) once
 # it can use the bot, so rolls start on promotion instead of on the weekly check.
 name: roll-toolchains
