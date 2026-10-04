@@ -3,7 +3,8 @@ import json
 import pytest
 
 from qqroll import land_check
-from tests_support import CLEAN_COMMIT, HEAD_RULES, LOCK_BASE, LOCK_HEAD, LOCK_PATCH, LOCKS, NPM_PATCH, PIP_PATCH, RULES, npm_file
+from tests_support import (CLEAN_COMMIT, HEAD_RULES, LOCK_BASE, LOCK_HEAD, LOCK_PATCH, LOCKS, NEXT_PEERS, NPM_PATCH,
+                           PIP_PATCH, REGISTRY, RULES, npm_file, registry, registry_from)
 
 ALLOWED_NPM = [["package.json", "npm-manifest"], ["pnpm-lock.yaml", "npm-lock"]]
 ALLOWED_PIP = [["requirements*.txt", "pip-requirements"]]
@@ -15,11 +16,11 @@ PIP_ENV = {"CHANGED": "1", "DEP_NAMES": "requests"}
 NPM_PATCH_TYPES = '@@ -1 +1 @@\n-      "@types/node": "^26.6.4",\n+      "@types/node": "^26.6.5",\n'
 
 
-def check(env=None, files=None, commits=None, rules=None, allowed=None, head_rules=None, locks=None):
+def check(env=None, files=None, commits=None, rules=None, allowed=None, head_rules=None, locks=None, reg=registry):
     return land_check.problems({**ENV, **(env or {})}, FILES if files is None else files,
                                [CLEAN_COMMIT] if commits is None else commits, RULES if rules is None else rules,
                                allowed or ALLOWED_NPM, HEAD_RULES if head_rules is None else head_rules,
-                               LOCKS if locks is None else locks)
+                               LOCKS if locks is None else locks, reg)
 
 
 def test_a_clean_roll_is_clean():
@@ -188,8 +189,11 @@ def test_risky_bumps_go_to_a_human(env, why):
 def test_a_minor_bump_past_1_0_is_clean():
     def bump(prev, new, update):
         env = {"UPDATE_TYPE": f"version-update:semver-{update}", "PREV_VERSION": prev, "NEW_VERSION": new}
-        base = LOCK_BASE.replace("16.3.7", prev).replace("^" + prev, "^" + prev)
-        return check(env=env, locks={"pnpm-lock.yaml": (base, base.replace(prev, new))})
+        base = LOCK_BASE.replace("16.3.7", prev)
+        same = {"dist": {"integrity": "sha512-old"}, "dependencies": {"styled-jsx": "5.1.6"}, "peerDependencies": NEXT_PEERS}
+        table = {**REGISTRY, ("next", new): same}
+        return check(env=env, locks={"pnpm-lock.yaml": (base, base.replace(prev, new))},
+                     reg=lambda n, v: registry(n, v, table))
     assert bump("16.2.4", "16.3.0", "minor") == []
     assert bump("0.5.1", "0.5.2", "patch") == []
 
@@ -219,8 +223,8 @@ def test_manifest_changes_only_the_bumped_dependency():
 
 # --- R-5: the lockfile moves only the bumped dependency -------------------------------------
 
-def lock_check(head, base=LOCK_BASE, env=None):
-    return check(env=env, locks={"pnpm-lock.yaml": (base, head)})
+def lock_check(head, base=LOCK_BASE, env=None, reg=registry):
+    return check(env=env, locks={"pnpm-lock.yaml": (base, head)}, reg=reg)
 
 
 TYPES_ENV = {"DEP_NAMES": "@types/node", "PREV_VERSION": "26.6.4", "NEW_VERSION": "26.6.5"}
@@ -229,7 +233,7 @@ TYPES_ENV = {"DEP_NAMES": "@types/node", "PREV_VERSION": "26.6.4", "NEW_VERSION"
 def test_a_clean_lockfile_bump_is_clean():
     assert lock_check(LOCK_HEAD) == []
     # A bump of a peer moves it inside other entries' peer suffixes too, as in innernet's lockfile.
-    scoped = LOCK_BASE.replace("26.6.4", "26.6.5")
+    scoped = LOCK_BASE.replace("26.6.4", "26.6.5").replace("sha512-typesnode}", "sha512-typesnode5}")
     assert "version: 16.3.7(@types/node@26.6.5)(react@19.3.0)" in scoped
     assert check(env=TYPES_ENV, files=[npm_file(patch=NPM_PATCH_TYPES), FILES[1]],
                  locks={"pnpm-lock.yaml": (LOCK_BASE, scoped)}) == []
@@ -240,9 +244,11 @@ def test_innernets_lockfile_shape_reads_and_bumps(tmp_path):
     real = pathlib.Path(__file__).with_name("innernet-pnpm-lock.yaml").read_text()
     assert land_check.lock_leaves(real)
     bumped = real.replace("@types/node@26.6.4", "@types/node@26.6.5").replace(
+        "'@types/node': 26.6.4", "'@types/node': 26.6.5").replace(
         "specifier: ^26.6.4\n        version: 26.6.4", "specifier: ^26.6.5\n        version: 26.6.5")
-    assert land_check.lock_problems("x", real, bumped, "@types/node", "26.6.4", "26.6.5") == []
-    assert land_check.lock_problems("x", real, bumped, "@types/node", "26.6.4", "26.6.6")
+    reg = registry_from(bumped)
+    assert land_check.lock_problems("x", real, bumped, "@types/node", "26.6.4", "26.6.5", reg) == []
+    assert land_check.lock_problems("x", real, bumped, "@types/node", "26.6.4", "26.6.6", reg)
 
 
 @pytest.mark.parametrize("edit, where", [
@@ -313,11 +319,13 @@ def test_quoted_keys_do_not_get_past_the_registry_check(line):
 
 
 def test_peer_versions_may_move_only_to_the_new_version():
-    head = LOCK_BASE.replace("react@19.3.0", "react@19.3.1").replace(
-        "specifier: ^19.3.0\n        version: 19.3.0", "specifier: ^19.3.1\n        version: 19.3.1")
-    assert land_check.lock_problems("x", LOCK_BASE, head, "react", "19.3.0", "19.3.1") == []
+    head = LOCK_BASE.replace("react@19.3.0", "react@19.3.1").replace("react: 19.3.0", "react: 19.3.1").replace(
+        "specifier: ^19.3.0\n        version: 19.3.0", "specifier: ^19.3.1\n        version: 19.3.1").replace(
+        "sha512-react}", "sha512-react1}")
+    assert land_check.lock_problems("x", LOCK_BASE, head, "react", "19.3.0", "19.3.1", registry) == []
     moved = head.replace("(react@19.3.1)", "(react@99.9.9)")
-    assert any("next/version" in p for p in land_check.lock_problems("x", LOCK_BASE, moved, "react", "19.3.0", "19.3.1"))
+    assert any("next/version" in p
+               for p in land_check.lock_problems("x", LOCK_BASE, moved, "react", "19.3.0", "19.3.1", registry))
 
 
 def test_an_escaped_tarball_is_not_clean():
@@ -392,6 +400,7 @@ def test_main_writes_the_output_and_fails_closed_on_bad_data(tmp_path, monkeypat
         (tmp_path / f"{name}.json").write_text(json.dumps(data))
     out = tmp_path / "out"
     monkeypatch.setattr(land_check, "read_locks", lambda env, files, allowed: LOCKS)
+    monkeypatch.setattr(land_check, "npm_registry", registry)
     env = {**ENV, "QQ_DIR": str(tmp_path), "QQ_ALLOWED": json.dumps(ALLOWED_NPM), "GITHUB_OUTPUT": str(out)}
     for k, v in env.items():
         monkeypatch.setenv(k, v)
@@ -400,3 +409,112 @@ def test_main_writes_the_output_and_fails_closed_on_bad_data(tmp_path, monkeypat
     (tmp_path / "rules.json").write_text('{"message": "Not Found"}')
     with pytest.raises(ValueError):
         land_check.main()
+
+
+# --- ROL-R6: the resolved tree is the registry's, and only the bump's closure changes -----------
+
+UNRELATED_EDGE = LOCK_HEAD.replace(   # a new registry package, wired into react's untouched snapshot
+    "  react@19.3.0: {}", "  react@19.3.0:\n    dependencies:\n      client-only: 0.0.1")
+
+
+@pytest.mark.parametrize("head, why", [
+    (UNRELATED_EDGE, 'changes the existing snapshot "react@19.3.0"'),
+    (LOCK_HEAD.replace("sha512-styled}", "sha512-evil}"), 'changes the existing package "styled-jsx@5.1.6"'),
+    (LOCK_HEAD.replace("sha512-styled}", "sha512-styled, tarball: https://evil.example/s.tgz}"),
+     'changes the existing package "styled-jsx@5.1.6"'),
+    (LOCK_HEAD.replace("sha512-new}", "sha512-evil}"), 'added package "next@16.3.8" does not have the registry'),
+    (LOCK_HEAD.replace("{integrity: sha512-clientonly}", "{integrity: sha512-clientonly, tarball: https://evil.example/c.tgz}"),
+     'added package "client-only@0.0.1" is not a registry package entry'),
+    (LOCK_HEAD.replace("{integrity: sha512-clientonly}", "{tarball: https://evil.example/c.tgz}"),
+     'added package "client-only@0.0.1" is not a registry package entry'),
+    (LOCK_HEAD.replace("  client-only@0.0.1:\n    resolution: {integrity: sha512-clientonly}",
+                       "  client-only@0.0.1:\n    resolution: {integrity: sha512-clientonly}\n    requiresBuild: true"),
+     'added package "client-only@0.0.1" is not a registry package entry'),
+    (LOCK_HEAD.replace("  react@19.3.0: {}", "  react@19.3.0: {dependencies: {client-only: 0.0.1}}"),
+     'snapshot "react@19.3.0" is not a snapshot of a package'),             # an edge hidden in a flow mapping
+    (LOCK_HEAD.replace("  client-only@0.0.1: {}", "  client-only@0.0.1: {dependencies: {evil: 1.0.0}}"),
+     'snapshot "client-only@0.0.1" is not a snapshot of a package'),
+    (LOCK_HEAD.replace("      client-only: 0.0.1\n", "      client-only: 0.0.1\n      evil: 1.0.0\n"),
+     'has an edge "evil": "1.0.0"'),                                                   # undeclared edge
+    (LOCK_HEAD.replace("styled-jsx: 5.1.6(react@19.3.0)", "styled-jsx: 5.1.6"),
+     'has an edge "styled-jsx": "5.1.6"'),                                              # no such snapshot
+    (LOCK_HEAD.replace("      client-only: 0.0.1\n", "      client-only: link:../evil\n"),
+     'has an edge "client-only": "link:../evil"'),
+    (LOCK_HEAD.replace("      client-only: 0.0.1\n", "      client-only: npm:evil@1.0.0\n"),
+     'has an edge "client-only": "npm:evil@1.0.0"'),
+    (LOCK_HEAD.replace("      client-only: 0.0.1\n", ""), 'added package "client-only@0.0.1" is not in the bumped'),
+    (LOCK_HEAD.replace("  client-only@0.0.1: {}", "  client-only@0.0.1: {}\n\n  react@19.3.1: {}").replace(
+        "  client-only@0.0.1:\n    resolution", "  react@19.3.1:\n    resolution: {integrity: sha512-react1}\n\n"
+        "  client-only@0.0.1:\n    resolution"), 'added package "react@19.3.1" is not in the bumped'),
+    (LOCK_HEAD.replace("  client-only@0.0.1: {}", "  client-only@0.0.1: {}\n\n  'Evil@1.0.0': {}"),
+     'snapshot "Evil@1.0.0" is not a snapshot of a package'),
+])
+def test_tree_changes_beyond_the_bumps_closure_are_not_clean(head, why):
+    found = lock_check(head)
+    assert any(why in p for p in found), found
+
+
+def test_the_auditors_integrity_swap_on_an_unbumped_package_is_not_clean():
+    """Audit of #12: a clean=true roll that swapped an un-bumped package's integrity."""
+    head = LOCK_HEAD.replace("{integrity: sha512-react}", "{integrity: sha512-react1}")
+    assert any('changes the existing package "react@19.3.0"' in p for p in lock_check(head))
+
+
+def test_an_edge_out_of_its_declared_range_is_not_clean():
+    table = {**REGISTRY, ("next", "16.3.8"): dict(REGISTRY[("next", "16.3.8")], dependencies={
+        "styled-jsx": "5.1.6", "client-only": "^0.1.0"})}
+    found = lock_check(LOCK_HEAD, reg=lambda n, v: registry(n, v, table))
+    assert any('has an edge "client-only": "0.0.1"' in p for p in found)
+
+
+def test_an_optional_peer_without_a_range_allows_any_version():
+    """sharp declares @types/node only in peerDependenciesMeta, which npm reads as an optional peer '*'."""
+    peers = {"react": NEXT_PEERS["react"]}
+    table = {**REGISTRY, ("next", "16.3.8"): dict(REGISTRY[("next", "16.3.8")], peerDependencies=peers,
+                                                  peerDependenciesMeta={"@types/node": {"optional": True}})}
+    assert lock_check(LOCK_HEAD, reg=lambda n, v: registry(n, v, table)) == []
+    table[("next", "16.3.8")] = dict(table[("next", "16.3.8")], peerDependenciesMeta={})
+    assert any('has an edge "@types/node"' in p for p in lock_check(LOCK_HEAD, reg=lambda n, v: registry(n, v, table)))
+
+
+def test_the_tree_is_refused_when_the_registry_cannot_be_consulted():
+    def down(name, version):
+        raise OSError("registry down")
+    assert any("could not check" in p for p in lock_check(LOCK_HEAD, reg=down))
+    assert any("registry was not consulted" in p for p in lock_check(LOCK_HEAD, reg=None))
+    missing = {k: v for k, v in REGISTRY.items() if k != ("client-only", "0.0.1")}
+    assert any('could not check "client-only@0.0.1"' in p
+               for p in lock_check(LOCK_HEAD, reg=lambda n, v: registry(n, v, missing)))
+
+
+def test_an_unchanged_tree_needs_no_registry():
+    head = LOCK_BASE.replace("autoInstallPeers: true", "autoInstallPeers: true")
+    assert land_check.lock_problems("x", LOCK_BASE, head, "next", "16.3.7", "16.3.8", None) == []
+
+
+@pytest.mark.parametrize("version, rng, ok", [
+    ("1.2.3", "1.2.3", True), ("1.2.4", "1.2.3", False), ("1.2.3", "=1.2.3", True), ("1.2.3", "v1.2.3", True),
+    ("1.9.0", "^1.2.3", True), ("2.0.0", "^1.2.3", False), ("1.2.2", "^1.2.3", False),
+    ("0.2.9", "^0.2.3", True), ("0.3.0", "^0.2.3", False), ("0.0.3", "^0.0.3", True), ("0.0.4", "^0.0.3", False),
+    ("0.9.0", "^0", True), ("1.0.0", "^0", False), ("1.2.9", "~1.2.3", True), ("1.3.0", "~1.2.3", False),
+    ("1.9.9", "~1", True), ("2.0.0", "~1", False), ("1.2.7", "1.2.x", True), ("1.3.0", "1.2", False),
+    ("5.0.0", "*", True), ("5.0.0", "", True), ("5.0.0", "x", True),
+    ("18.0.0", ">=18", True), ("17.9.9", ">=18", False), ("19.3.1", ">= 16.8.0", True),
+    ("2.0.0", ">1", True), ("1.9.9", ">1", False), ("1.9.9", "<=1", True), ("2.0.0", "<=1", False),
+    ("1.5.0", ">=1.2.0 <2.0.0", True), ("2.0.0", ">=1.2.0 <2.0.0", False),
+    ("19.0.0", "^18.2.0 || ^19.0.0", True), ("17.0.0", "^18.2.0 || ^19.0.0", False),
+    ("2.3.4", "1.2.3 - 2.3.4", True), ("2.3.5", "1.2.3 - 2.3.4", False), ("2.3.9", "1.2.3 - 2.3", True),
+    ("2.4.0", "1.2.3 - 2.3", False),
+    ("1.2.3-beta.2", "^1.2.3-beta.1", True), ("1.2.4-beta.1", "^1.2.3-beta.1", False),
+    ("2.0.0-rc.1", "^1.2.3", False), ("2.0.0-rc.1", "<2.0.0", False), ("1.2.3-alpha.10", ">=1.2.3-alpha.9", True),
+    ("1.2.3", ">=1.2.3-alpha.9", True), ("1.2.3-alpha", "1.2.3-alpha", True),
+])
+def test_satisfies_follows_npm(version, rng, ok):
+    assert land_check.satisfies(version, rng) is ok
+
+
+@pytest.mark.parametrize("rng", ["latest", "npm:evil@1.0.0", "github:a/b", "file:../x", "https://x/y.tgz",
+                                 "1.2.3-", ">=1.2-beta"])
+def test_satisfies_refuses_what_it_cannot_read(rng):
+    with pytest.raises(ValueError):
+        land_check.satisfies("1.2.3", rng)

@@ -70,13 +70,30 @@ def test_land_workflow_uses_the_repos_slug():
 def test_generated_step_runs_the_check(tmp_path):
     """Run the generated step's shell with `gh` faked: a clean roll, then a forged one."""
     import json as _json
-    from tests_support import CLEAN_COMMIT, HEAD_RULES, LOCK_BASE, LOCK_HEAD, LOCK_PATCH, RULES, npm_file
+    import sys
+    from tests_support import CLEAN_COMMIT, HEAD_RULES, LOCK_BASE, LOCK_HEAD, LOCK_PATCH, REGISTRY, RULES, npm_file, registry
     text = dependabot.land_workflow(ROLLERS, "innernet", COMMIT, "quirq-ai/innernet")
     step = yaml.safe_load(text)["jobs"]["land"]["steps"][1]
     bindir = tmp_path / "bin"
     bindir.mkdir()
 
     (tmp_path / "base.lock").write_text(LOCK_BASE)
+    # python3 runs the embedded check with registry.npmjs.org answered from the fake registry.
+    (tmp_path / "registry.json").write_text(_json.dumps(
+        {f"https://registry.npmjs.org/{n}/{v}": registry(n, v) for n, v in REGISTRY}))
+    (bindir / "python3").write_text(
+        f"#!{sys.executable}\n"
+        "import io, json, sys, urllib.request\n"
+        f"answers = json.load(open({str(tmp_path / 'registry.json')!r}))\n"
+        "class Answer(io.BytesIO):\n"
+        "    def __init__(self, url):\n"
+        "        super().__init__(json.dumps(answers[url]).encode())\n"
+        "        self.url = url\n"
+        "    def geturl(self):\n"
+        "        return self.url\n"
+        "urllib.request.urlopen = lambda req, timeout=None: Answer(req.full_url.replace('%40', '@'))\n"
+        "exec(compile(sys.stdin.read(), 'land_check', 'exec'), {'__name__': '__main__'})\n")
+    (bindir / "python3").chmod(0o755)
 
     def run(commits, head_rules=HEAD_RULES, head_lock=LOCK_HEAD):
         (tmp_path / "head_rules").write_text(_json.dumps([head_rules]))
