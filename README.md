@@ -75,6 +75,16 @@ cannot read rulesets' bypass lists, so keeping Dependabot the only exempt actor 
 rolls only move `requirements*.txt` floors, and may open no PR at all (`TODO(expert)` in
 `rollers.toml`); the done-when is shown on innernet first.
 
+Auto-land stays off until all of these hold (ROL-R6 audit): the land check with the tree check is
+delivered to both repos (C-1); the post-v0 settings run has applied the admin steps above, with only
+Dependabot exempt from the `dependabot/**` rule (C-2); and the runners reach `registry.npmjs.org`
+(C-3; GitHub-hosted runners do). Notes for that settings run, not built here: give Dependabot a
+`cooldown` (3 to 7 days) or pnpm a `minimumReleaseAge`, since a compromised release is a valid registry
+release the tree check accepts (C-4); and keep the repos on pnpm 10 or later, which runs no dependency
+install scripts unless allowlisted, or install with scripts off in the gate (C-5). Not checked by the
+tree check: which in-range version a new transitive dependency resolves to, and added snapshots'
+`transitivePeerDependencies` and peer-suffix labels (they only name snapshots that are verified).
+
 ## Toolchain pins: `qqroll roll` and `qqroll rotation` (V0-ROL-01)
 
 `quirq-ai/toolchains` records each promoted toolchain by digest in `promoted.toml` (V0-TCH-03). The

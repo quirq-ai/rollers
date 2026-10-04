@@ -642,3 +642,57 @@ def test_an_optional_importer_entry_may_have_optional_snapshots():
     assert any("marked optional" in p for p in lock_check(head.replace("optionalDependencies:\n      next:",
                                                                          "dependencies:\n      next:", 1),
                                                             base=LOCK_BASE))
+
+
+# --- ROL-R6 audit follow-ups -------------------------------------------------------------------
+
+@pytest.mark.parametrize("version, rng, ok", [
+    ("1.0.0", ">*", False), ("1.0.0", "<*", False), ("1.0.0", ">x", False), ("1.0.0", "<=*", True),
+    ("1.0.0", ">=*", True), ("1.0.0", "1 - *", True), ("1.0.0", "* - 2", True),
+    # npm reads an any-version alternative as plain *, which excludes prereleases
+    ("10.10.2-0", "<10.10.2-1 >=10.2.* || * - *.0", False), ("1.0.0-1", ">=1.0.0-0 || *", False),
+    # a range that names a -0 prerelease admits prereleases of that version
+    ("3.0.0-beta", ">=3.0.0-0", True), ("3.0.0-beta", "^3.0.0-0 || 0.0", True), ("3.0.0-beta", "~3.0.0-0 >=*", True),
+])
+def test_satisfies_matches_npm_on_audit_cases(version, rng, ok):
+    assert land_check.satisfies(version, rng) is ok
+
+
+@pytest.mark.parametrize("version", ["1.2.3-01", "1.2.3-beta..1", "1.2.3-"])
+def test_versions_with_bad_prerelease_identifiers_are_refused(version):
+    with pytest.raises(ValueError):
+        land_check.satisfies(version, "*")
+
+
+def test_an_unreadable_range_in_the_registry_is_refused_cleanly():
+    table = {**REGISTRY, ("next", "16.3.8"): dict(REGISTRY[("next", "16.3.8")], dependencies={
+        "styled-jsx": "5.1.6", "client-only": "npm:evil@1.0.0"})}
+    found = lock_check(LOCK_HEAD, reg=lambda n, v: registry(n, v, table))
+    assert any('has an edge "client-only"' in p for p in found)
+
+
+def test_flow_depth_counts_nesting_not_collections():
+    assert land_check._flow("{" + ", ".join(f"k{i}: [a, [b]]" for i in range(20)) + "}")["k19"] == ["a", ["b"]]
+    with pytest.raises(ValueError):
+        land_check._flow("[" * 9 + "x" + "]" * 9)
+
+
+@pytest.mark.parametrize("version, rng, ok", [
+    # review of #15: >X and <X.Y on partials, as npm desugars them
+    ("1.0.0-a", ">= 1.0.0-1 >0", False), ("1.0.0-1", "1.0.0-1 >0.x.0", False),
+    ("0.1.0-1", ">= 0.1.0-0.0 < 0.1", False), ("2.0.0", ">1", True), ("1.9.9", ">1", False), ("0.0.9", "<0.1", True),
+])
+def test_satisfies_partial_bounds_match_npm(version, rng, ok):
+    assert land_check.satisfies(version, rng) is ok
+
+
+@pytest.mark.parametrize("rng", [">=2+b", "1.x+b", "< = 2"])
+def test_satisfies_refuses_ranges_npm_finds_invalid(rng):
+    with pytest.raises(ValueError):
+        land_check.satisfies("10.0.2", rng)
+
+
+@pytest.mark.parametrize("text", ["{[a]: b}", "{{a: b}: c}"])
+def test_flow_keys_must_be_scalars(text):
+    with pytest.raises(ValueError):
+        land_check._flow(text)
