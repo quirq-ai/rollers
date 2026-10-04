@@ -92,7 +92,8 @@ LAND_WORKFLOW = """\
 # below) requires all of: Dependabot opened and last triggered the PR; exactly one commit, made by
 # GitHub for Dependabot; only modified dependency files whose changed lines are version lines of the
 # bumped dependency, changing only its version numbers (no scripts, index options, URLs, extras or
-# non-registry resolutions); a patch or minor bump of one dependency,
+# non-registry resolutions), and in pnpm-lock.yaml no change outside the resolved tree but the bumped
+# dependency's importer entries; a patch or minor bump of one dependency,
 # where a 0.x minor counts as major; a gate on the base branch no workflow can fake (a required
 # workflow pinned by sha, or a required check bound to an app other than GitHub Actions); and rules on
 # the head branch that stop pushes to it after this check (update and non_fast_forward).
@@ -136,6 +137,8 @@ jobs:
           PREV_VERSION: ${{{{ steps.meta.outputs.previous-version }}}}
           DEP_NAMES: ${{{{ steps.meta.outputs.dependency-names }}}}
           QQ_ALLOWED: '{allowed}'
+          BASE_SHA: ${{{{ github.event.pull_request.base.sha }}}}
+          HEAD_SHA: ${{{{ github.event.pull_request.head.sha }}}}
         run: |
           export QQ_DIR=$(mktemp -d)
           gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls/$PR/files" > "$QQ_DIR/files.json"

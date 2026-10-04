@@ -6,6 +6,8 @@ so it uses only the standard library and reads everything from the environment:
     QQ_DIR        directory holding files.json, commits.json, rules.json (base branch) and head_rules.json
                   (head branch), each from `gh api --paginate --slurp`
     QQ_ALLOWED    JSON list of [glob, kind]: the files a roll may modify and how their lines are checked
+    BASE_SHA, HEAD_SHA  the PR's base and head commits; changed lockfiles are read whole at the merge base
+                  and the head with `gh api` (GH_TOKEN, GITHUB_REPOSITORY)
     SENDER, TRIGGER, CHANGED, UPDATE_TYPE, PREV_VERSION, DEP_NAMES, GITHUB_OUTPUT
 
 A PR is clean only when every rule holds; anything else goes to a human. It fails closed: missing
@@ -15,7 +17,9 @@ import fnmatch
 import json
 import os
 import re
+import subprocess
 import sys
+import urllib.parse
 
 DEPENDABOT = "dependabot[bot]"
 MAX_FILES = 20
@@ -40,6 +44,7 @@ LINE_RULES = {
 CONTROL = re.compile("[\x00-\x08\x0a-\x1f\x7f-\x9f\u2028\u2029]")
 # A version where one starts: right after an operator, a range prefix or the opening quote.
 _PLACED_VERSION = re.compile(r'(?<=[=<>~!^"])\s*' + _VERSION)
+_BARE_VERSION = re.compile(_VERSION)
 # Added lockfile lines may not point anywhere but the registry.
 LOCK_FORBIDDEN = re.compile(r"tarball:|://|git\+|git@|\bfile:|\blink:|\bgithub:|\brepo:|\bdirectory:|"
                             r"\btype:\s*(git|directory)\b")
@@ -88,7 +93,87 @@ def entry(kind, m):
     return dep_name(kind, m["key"]), " ".join(_PLACED_VERSION.sub("V", rest).split())
 
 
-def problems(env, files, commits, rules, allowed, head_rules):
+# pnpm-lock.yaml: the importers section says which version of each direct dependency is installed, and
+# settings (and any other top-level section) how. A roll of one dependency may change only that
+# dependency's specifier and version there. packages and snapshots hold the resolved tree, which a bump
+# legitimately reshapes; their added lines are only checked against LOCK_FORBIDDEN.
+# TODO(expert): check snapshots against registry metadata, so a roll cannot add a dependency edge to an
+# unrelated package's snapshot.
+LOCK_TREE = {"packages", "snapshots"}
+LOCK_DEP_TYPES = {"dependencies", "devDependencies", "optionalDependencies"}
+_LOCK_VERSION = re.compile(r"[0-9][0-9A-Za-z.+-]*(\(.*\))?")
+
+
+def lock_leaves(text):
+    """pnpm-lock.yaml as {key path: scalar}, for its subset of YAML: block mappings and block lists of
+    scalars (a list is one leaf under the key "-"); flow values stay text.
+
+    Anything outside that subset raises ValueError, so an odd lockfile fails closed.
+    """
+    leaves, stack = {}, []
+    for n, line in enumerate(text.split("\n"), 1):
+        line = line.removesuffix("\r")
+        body = line.strip(" ")
+        if not body or body.startswith("#"):
+            continue
+        if CONTROL.search(line) or "\t" in line:
+            raise ValueError(f"line {n}: control character")
+        indent = len(line) - len(line.lstrip(" "))
+        if body == "-" or body.startswith("- "):  # a block list item: kept, in order, as the list's text
+            while stack and stack[-1][0] >= indent:
+                stack.pop()
+            if not stack:
+                raise ValueError(f"line {n}: list item outside a mapping")
+            path = tuple(k for _, k in stack) + ("-",)
+            leaves[path] = (leaves.get(path) or "") + body[1:].strip() + "\n"
+            continue
+        if body.startswith(("'", '"')):
+            end = body.find(body[0], 1)
+            if end < 0 or body[end + 1:end + 2] != ":":
+                raise ValueError(f"line {n}: unterminated quoted key")
+            key, rest = body[1:end], body[end + 2:]
+        elif ": " in body or body.endswith(":"):
+            key, _, rest = body.partition(":")
+        else:
+            raise ValueError(f"line {n}: not a mapping entry")
+        if rest and not rest.startswith(" "):
+            raise ValueError(f"line {n}: not a mapping entry")
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        path = tuple(k for _, k in stack) + (key,)
+        if path in leaves:
+            raise ValueError(f"line {n}: duplicate key {'/'.join(path)}")
+        leaves[path] = rest.strip() or None
+        if not rest.strip():
+            stack.append((indent, key))
+    return leaves
+
+
+def lock_problems(shown, base, head, deps):
+    """What a roll of `deps` changes in pnpm-lock.yaml beyond the bumped dependency's importer entries."""
+    try:
+        old, new = lock_leaves(base), lock_leaves(head)
+    except ValueError as e:
+        return [f"{shown}: not a lockfile this check can read ({e})"]
+    out = []
+    for path in sorted(set(old) | set(new)):
+        if old.get(path, ()) == new.get(path, ()) or path[0] in LOCK_TREE:
+            continue
+        bumped = (len(path) == 5 and path[0] == "importers" and path[2] in LOCK_DEP_TYPES
+                  and path[3] in deps and path[4] in ("specifier", "version")
+                  and old.get(path) and new.get(path))
+        if bumped and path[4] == "specifier" and _BARE_VERSION.sub("V", old[path]) == _BARE_VERSION.sub("V", new[path]):
+            continue
+        if bumped and path[4] == "version" and _LOCK_VERSION.fullmatch(new[path]):
+            continue
+        out.append(f"{shown}: changes {json.dumps('/'.join(path))[:100]}, which a roll of "
+                   f"{json.dumps(sorted(deps))} may not")
+    return out[:10]
+
+
+def problems(env, files, commits, rules, allowed, head_rules, locks):
+    """Why the roll is not clean; empty when it is. `locks` maps each changed npm-lock file to its
+    (merge base, head) contents."""
     out = []
     if env.get("SENDER") != DEPENDABOT or env.get("TRIGGER") != DEPENDABOT:
         out.append(f"triggered by {env.get('SENDER')!r}/{env.get('TRIGGER')!r}, not Dependabot")
@@ -147,6 +232,11 @@ def problems(env, files, commits, rules, allowed, head_rules):
         # their version numbers changed, and only for the dependency the PR says it bumps.
         if sorted(keys["+"]) != sorted(keys["-"]):
             out.append(f"{shown}: adds, removes or reshapes entries, not only versions")
+        if kinds[0] == "npm-lock":
+            if filename not in locks:
+                out.append(f"{shown}: lockfile contents were not read")
+            else:
+                out += lock_problems(shown, *locks[filename], deps["npm-manifest"])
         others = sorted({n for n, _ in keys["+"] + keys["-"]} - deps.get(kinds[0], set()))
         if others:
             out.append(f"{shown}: changes {json.dumps(others)[:100]}, not the bumped dependency")
@@ -189,11 +279,32 @@ def problems(env, files, commits, rules, allowed, head_rules):
     return out
 
 
+def gh(*args):
+    return subprocess.run(["gh", "api", *args], check=True, capture_output=True, text=True).stdout
+
+
+def read_locks(env, files, allowed):
+    """(merge base, head) contents of each changed npm-lock file, read whole through the contents API."""
+    names = [f.get("filename", "") for f in files
+             if any(kind == "npm-lock" and matches(f.get("filename", ""), glob) for glob, kind in allowed)]
+    if not names:
+        return {}
+    repo, head = env["GITHUB_REPOSITORY"], env["HEAD_SHA"]
+    base = gh(f"repos/{repo}/compare/{env['BASE_SHA']}...{head}", "--jq", ".merge_base_commit.sha").strip()
+    for sha in (base, head):
+        if not re.fullmatch(r"[0-9a-f]{40}", sha):
+            raise ValueError(f"not a commit sha: {sha!r}")
+    raw = ("-H", "Accept: application/vnd.github.raw+json")
+    return {name: tuple(gh(*raw, f"repos/{repo}/contents/{urllib.parse.quote(name)}?ref={sha}")
+                        for sha in (base, head)) for name in names}
+
+
 def main():
     env = os.environ
     d = env["QQ_DIR"]
-    found = problems(env, pages(f"{d}/files.json"), pages(f"{d}/commits.json"), pages(f"{d}/rules.json"),
-                     json.loads(env["QQ_ALLOWED"]), pages(f"{d}/head_rules.json"))
+    files, allowed = pages(f"{d}/files.json"), json.loads(env["QQ_ALLOWED"])
+    found = problems(env, files, pages(f"{d}/commits.json"), pages(f"{d}/rules.json"),
+                     allowed, pages(f"{d}/head_rules.json"), read_locks(env, files, allowed))
     for p in found:
         print(f"not clean: {p}")
     if not found:

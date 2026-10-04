@@ -3,7 +3,7 @@ import json
 import pytest
 
 from qqroll import land_check
-from tests_support import CLEAN_COMMIT, HEAD_RULES, LOCK_PATCH, PIP_PATCH, RULES, npm_file
+from tests_support import CLEAN_COMMIT, HEAD_RULES, LOCK_BASE, LOCK_HEAD, LOCK_PATCH, LOCKS, NPM_PATCH, PIP_PATCH, RULES, npm_file
 
 ALLOWED_NPM = [["package.json", "npm-manifest"], ["pnpm-lock.yaml", "npm-lock"]]
 ALLOWED_PIP = [["requirements*.txt", "pip-requirements"]]
@@ -11,12 +11,14 @@ ENV = {"SENDER": "dependabot[bot]", "TRIGGER": "dependabot[bot]", "CHANGED": "2"
        "UPDATE_TYPE": "version-update:semver-patch", "PREV_VERSION": "16.3.7", "DEP_NAMES": "next"}
 FILES = [npm_file(), npm_file("pnpm-lock.yaml", LOCK_PATCH)]
 PIP_ENV = {"CHANGED": "1", "DEP_NAMES": "requests"}
+NPM_PATCH_TYPES = '@@ -1 +1 @@\n-      "@types/node": "^26.6.4",\n+      "@types/node": "^26.6.5",\n'
 
 
-def check(env=None, files=None, commits=None, rules=None, allowed=None, head_rules=None):
+def check(env=None, files=None, commits=None, rules=None, allowed=None, head_rules=None, locks=None):
     return land_check.problems({**ENV, **(env or {})}, FILES if files is None else files,
                                [CLEAN_COMMIT] if commits is None else commits, RULES if rules is None else rules,
-                               allowed or ALLOWED_NPM, HEAD_RULES if head_rules is None else head_rules)
+                               allowed or ALLOWED_NPM, HEAD_RULES if head_rules is None else head_rules,
+                               LOCKS if locks is None else locks)
 
 
 def test_a_clean_roll_is_clean():
@@ -210,6 +212,55 @@ def test_manifest_changes_only_the_bumped_dependency():
     assert any("not the bumped dependency" in p for p in check(files=[npm_file(patch=patch), FILES[1]]))
 
 
+# --- R-5: the lockfile moves only the bumped dependency -------------------------------------
+
+def lock_check(head, base=LOCK_BASE, deps="next"):
+    return check(env={"DEP_NAMES": deps}, locks={"pnpm-lock.yaml": (base, head)})
+
+
+def test_a_clean_lockfile_bump_is_clean():
+    assert lock_check(LOCK_HEAD) == []
+    scoped = LOCK_BASE.replace("26.6.4", "26.6.5")
+    assert check(env={"DEP_NAMES": "@types/node"}, files=[npm_file(patch=NPM_PATCH_TYPES), FILES[1]],
+                 locks={"pnpm-lock.yaml": (LOCK_BASE, scoped)}) == []
+
+
+@pytest.mark.parametrize("edit, where", [
+    (("version: 19.3.0\n", "version: 19.3.1\n"), "importers/./dependencies/react/version"),     # moves react too
+    (("specifier: ^19.3.0", "specifier: ^19.4.0"), "importers/./dependencies/react/specifier"),
+    (("autoInstallPeers: true", "autoInstallPeers: false"), "settings/autoInstallPeers"),
+    (("lockfileVersion: '9.0'", "lockfileVersion: '6.0'"), "lockfileVersion"),
+    (("    devDependencies:\n", "    devDependencies:\n      evil:\n        specifier: 1.0.0\n        version: 1.0.0\n"),
+     "importers/./devDependencies/evil"),                                                       # adds a package
+    (("specifier: ^16.3.8", "specifier: 16.3.8"), "importers/./dependencies/next/specifier"),  # pin reshaped
+    (("version: 16.3.8(react@19.3.0)", "version: link:../next"), "importers/./dependencies/next/version"),
+    (("importers:\n", "overrides:\n  react: 18.0.0\n\nimporters:\n"), "overrides/react"),
+])
+def test_lockfile_changes_beyond_the_bump_are_not_clean(edit, where):
+    assert any(json.dumps(where) in p for p in lock_check(LOCK_HEAD.replace(*edit, 1)))
+
+
+def test_the_bumped_name_must_match():
+    assert any("importers/./dependencies/next/version" in p for p in lock_check(LOCK_HEAD, deps="react"))
+
+
+@pytest.mark.parametrize("text", ["importers:\n  .:\n    dependencies:\n      next 16\n",
+                                  "importers:\n  'next:\n", "a: 1\na: 2\n", "a:\n  b: \x0c1\n", "- top\n"])
+def test_an_unreadable_lockfile_is_not_clean(text):
+    assert any("not a lockfile this check can read" in p for p in lock_check(text))
+
+
+def test_a_lockfile_not_read_is_not_clean():
+    assert any("lockfile contents were not read" in p for p in check(locks={}))
+
+
+def test_lock_leaves_reads_innernets_shape():
+    leaves = land_check.lock_leaves(LOCK_BASE)
+    assert leaves[("importers", ".", "devDependencies", "@types/node", "version")] == "26.6.4"
+    assert leaves[("packages", "next@16.3.7", "bundledDependencies", "-")] == "a\n"
+    assert leaves[("packages", "next@16.3.7", "engines")] == "{node: '>=20.9.0'}"
+
+
 # --- S-4: something must gate it --------------------------------------------------------------
 
 @pytest.mark.parametrize("rules", [
@@ -239,10 +290,29 @@ def test_writable_pr_branch_is_not_clean(head_rules):
 
 # --- main -------------------------------------------------------------------------------------
 
+def test_read_locks_reads_the_merge_base_and_head(monkeypatch):
+    calls = []
+
+    def fake_gh(*args):
+        calls.append(args)
+        if "compare" in args[0]:
+            return "b" * 40 + "\n"
+        return {f"ref={'b' * 40}": LOCK_BASE, f"ref={'c' * 40}": LOCK_HEAD}[args[-1].split("?")[1]]
+    monkeypatch.setattr(land_check, "gh", fake_gh)
+    env = {"GITHUB_REPOSITORY": "quirq-ai/innernet", "BASE_SHA": "a" * 40, "HEAD_SHA": "c" * 40}
+    assert land_check.read_locks(env, FILES, ALLOWED_NPM) == LOCKS
+    assert calls[0] == (f"repos/quirq-ai/innernet/compare/{'a' * 40}...{'c' * 40}", "--jq", ".merge_base_commit.sha")
+    assert land_check.read_locks(env, [FILES[0]], ALLOWED_NPM) == {}
+    monkeypatch.setattr(land_check, "gh", lambda *a: "main\n")
+    with pytest.raises(ValueError, match="not a commit sha"):
+        land_check.read_locks(env, FILES, ALLOWED_NPM)
+
+
 def test_main_writes_the_output_and_fails_closed_on_bad_data(tmp_path, monkeypatch, capsys):
     for name, data in [("files", [FILES]), ("commits", [[CLEAN_COMMIT]]), ("rules", [RULES]), ("head_rules", [HEAD_RULES])]:
         (tmp_path / f"{name}.json").write_text(json.dumps(data))
     out = tmp_path / "out"
+    monkeypatch.setattr(land_check, "read_locks", lambda env, files, allowed: LOCKS)
     env = {**ENV, "QQ_DIR": str(tmp_path), "QQ_ALLOWED": json.dumps(ALLOWED_NPM), "GITHUB_OUTPUT": str(out)}
     for k, v in env.items():
         monkeypatch.setenv(k, v)
