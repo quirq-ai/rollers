@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "Rollers for quirq infra (qq): toolchain pin rolls and lockfile update config."
 readme = "README.md"
 requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 dependencies = ["qqsync @ git+https://github.com/quirq-ai/sync@c51e40205e26771cd88bfc02e0c7522b5ee8271d"]
 
 [project.optional-dependencies]
