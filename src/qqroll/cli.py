@@ -108,6 +108,10 @@ def cmd_rotation(args) -> int:
 
     token = os.environ.get("QQ_ROLLER_TOKEN") or None
     read_token = token or os.environ.get("QQ_READ_TOKEN") or None  # dry runs read with any token
+    if args.apply and args.toolchains:
+        print("qqroll: --apply needs --promoted-json: qqtc must not run in a process that holds the bot "
+              "token (a child process can read its parent's environment)", file=sys.stderr)
+        return 1
     if args.apply and not token:
         print("qqroll: --apply needs QQ_ROLLER_TOKEN, the quirq infra bot's token. PRs opened with a "
               "workflow's GITHUB_TOKEN trigger no workflows, so they would never be gated.", file=sys.stderr)

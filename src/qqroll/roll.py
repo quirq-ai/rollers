@@ -103,8 +103,9 @@ def plan(text: str, promoted: list[Promoted], *, source: str = "infra/repo.toml"
                 version_at[platform] = new.version
                 continue
             # The pin's version label is the only record of what it is at, so without a numeric one a
-            # downgrade cannot be ruled out. (A revert to an earlier revision of the same version is a
-            # reviewed promotion on toolchains main, and rolls.)
+            # downgrade cannot be ruled out. Revisions are not recorded in the manifest, so a revert to an
+            # earlier revision of the same version still rolls; that is fine only while a person lands
+            # every roll. TODO(expert): compare revisions before --auto-merge is ever turned on.
             have, want = _numeric(pin.get("version")), _numeric(new.version)
             if have is None or want is None:
                 roll.skipped.append(f"{name} ({platform}): version label {pin.get('version')!r} or promoted "

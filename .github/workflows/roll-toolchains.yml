@@ -87,6 +87,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}        # gh attestation verify reads toolchains' public attestations
           TOOLCHAINS_COMMIT: ${{ needs.promoted.outputs.commit }}
         run: |
+          # The promoted job ran toolchains code, which can write any of that job's outputs: both are
+          # checked here (the entries again in qqroll), never used as they came.
+          [[ "$TOOLCHAINS_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::promoted job gave no commit sha"; exit 1; }
           apply=
           if [ -n "$QQ_ROLLER_TOKEN" ]; then apply=--apply
           else echo "::warning::no quirq infra bot token (QQ_BOT_CLIENT_ID); dry run only"; fi

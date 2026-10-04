@@ -46,8 +46,9 @@ rolls only move `requirements*.txt` floors, and may open no PR at all (`TODO(exp
 
 `quirq-ai/toolchains` records each promoted toolchain by digest in `promoted.toml` (V0-TCH-03). The
 roller reads it from a checkout of toolchains `main`, only through toolchains' own parser
-(`qqtc promoted-changed`, run as its own isolated process with no credentials; in CI, in a separate
-job from the one holding the bot token, whose JSON output is re-validated here), and moves every repo's `[toolchains.*]` pins in `infra/repo.toml`
+(`qqtc promoted-changed`, run as its own isolated process). With `--apply` the rotation takes only
+`--promoted-json`, made where no bot token exists (in CI, a separate job), and re-validates it. It
+then moves every repo's `[toolchains.*]` pins in `infra/repo.toml`
 to those digests in sync's `oci://` form: `source` names the image manifest by digest and `digest` is
 its one toolchain layer. The manifest is edited only through `qqsync`, so a roll changes just the pin
 and its `version` label and leaves every other byte alone.

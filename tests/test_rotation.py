@@ -301,3 +301,16 @@ def test_verify_promotion_fails_closed():
     assert "no build provenance" in reason and "gh failed" in reason
     missing = Backend(run=lambda argv: (127, b"", f"{argv[0]} is not installed"))
     assert "oras is not installed" in missing.verify_promotion(PROMOTED[1])
+
+
+def test_cli_apply_refuses_to_run_qqtc_itself(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("QQ_ROLLER_TOKEN", "t")
+    args = ["rotation", "--infra-config", str(tmp_path), "--toolchains", str(tmp_path), "--apply"]
+    assert main(args) == 1
+    assert "--apply needs --promoted-json" in capsys.readouterr().err
+
+
+def test_from_entry_needs_strings():
+    from qqroll import promoted as pm
+    with pytest.raises(pm.PromotedError, match="built_from is not a string"):
+        pm.from_entry(entry(built_from=int("1" * 40)))

@@ -68,7 +68,10 @@ def from_entry(entry: dict, where: str = "promoted.toml") -> Promoted:
     revision = entry.get("revision")
     if type(revision) is not int or revision < 1:
         raise PromotedError(f"{where}: {entry['name']}: revision {revision!r} is not a positive integer")
-    m = _REF.match(str(entry.get("ref", "")))
+    for key in ("ref", "layer_sha256", "built_from", "build_run"):
+        if not isinstance(entry.get(key), str):
+            raise PromotedError(f"{where}: {entry['name']}: {key} is not a string")
+    m = _REF.match(entry["ref"])
     if not m:
         raise PromotedError(f"{where}: {entry.get('name')}: ref {entry.get('ref')!r} is not oci://<image>@sha256:<64 hex>")
     if not _LAYER.match(str(entry.get("layer_sha256", ""))):
