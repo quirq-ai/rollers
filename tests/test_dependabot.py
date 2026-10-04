@@ -1,3 +1,4 @@
+import json
 import subprocess
 from pathlib import Path
 
@@ -47,10 +48,15 @@ def test_land_workflow_is_valid_and_scoped():
     assert "dependabot[bot]" in job["if"] and "'quirq-ai/xo-space'" in job["if"]
     assert wf["permissions"] == {"contents": "write", "pull-requests": "write"}
     assert job["steps"][0]["uses"] == "dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98"
-    run = job["steps"][1]["run"]
-    assert """allowed=('"pyproject.toml"' '"requirements*.txt"')""" in run
+    check = job["steps"][1]
+    assert json.loads(check["env"]["QQ_ALLOWED"]) == [["requirements*.txt", "pip-requirements"]]
+    assert check["env"]["SENDER"] == "${{ github.event.sender.login }}"
+    # The embedded check is land_check.py, byte for byte.
+    embedded = check["run"].split("<<'QQ_LAND_CHECK'\n", 1)[1].rsplit("QQ_LAND_CHECK", 1)[0]
+    assert embedded == dependabot.LAND_CHECK.read_text()
     land = job["steps"][2]
-    assert "semver-major" in land["if"] and land["run"].startswith('gh pr merge --auto --squash --match-head-commit "$HEAD_SHA" "$PR_URL"')
+    assert land["if"] == "steps.clean.outputs.clean == 'true'"
+    assert land["run"].startswith('gh pr merge --auto --squash --match-head-commit "$HEAD_SHA" "$PR_URL"')
     # Any failure before landing, or a skipped land, turns auto-merge off.
     assert job["steps"][3]["if"] == "always() && steps.land.outcome != 'success'"
     assert job["steps"][3]["run"].startswith('gh pr merge --disable-auto "$PR_URL"')
@@ -61,63 +67,44 @@ def test_land_workflow_uses_the_repos_slug():
     assert "'someone/xo-space'" in yaml.safe_load(text)["jobs"]["land"]["if"]
 
 
-def _clean_check(tmp_path, repo):
-    """The generated shell check, runnable against fake `gh api` output."""
-    text = dependabot.land_workflow(ROLLERS, repo, COMMIT, f"quirq-ai/{repo}")
-    script = yaml.safe_load(text)["jobs"]["land"]["steps"][1]["run"]
+def test_generated_step_runs_the_check(tmp_path):
+    """Run the generated step's shell with `gh` faked: a clean roll, then a forged one."""
+    import json as _json
+    from tests_support import CLEAN_COMMIT, HEAD_RULES, RULES, npm_file
+    text = dependabot.land_workflow(ROLLERS, "innernet", COMMIT, "quirq-ai/innernet")
+    step = yaml.safe_load(text)["jobs"]["land"]["steps"][1]
     bindir = tmp_path / "bin"
-    bindir.mkdir(exist_ok=True)
+    bindir.mkdir()
 
-    def clean(files, bad_commits=(), gh_fails=False):
-        import json as _json
-        enc = "\n".join(_json.dumps(f) for f in files)
-        (tmp_path / "files").write_text(enc + ("\n" if enc else ""))
-        (tmp_path / "commits").write_text("".join(c + "\n" for c in bad_commits))
+    def run(commits, head_rules=HEAD_RULES):
+        (tmp_path / "head_rules").write_text(_json.dumps([head_rules]))
+        (tmp_path / "files").write_text(_json.dumps([[npm_file()]]))
+        (tmp_path / "commits").write_text(_json.dumps([commits]))
+        (tmp_path / "rules").write_text(_json.dumps([RULES]))
         (bindir / "gh").write_text(
-            "#!/bin/sh\n" + ("exit 1\n" if gh_fails else "") +
-            f'case "$*" in *files*) cat {tmp_path}/files;; *commits*) cat {tmp_path}/commits;; esac\n')
+            "#!/bin/sh\n"
+            f'case "$*" in *files*) cat {tmp_path}/files;; *commits*) cat {tmp_path}/commits;; '
+            f'*rules/branches/main) cat {tmp_path}/rules;; '
+            f'*rules/branches/dependabot%2Fnpm_and_yarn%2Fnext-16.3.8) cat {tmp_path}/head_rules;; *) exit 1;; esac\n')
         (bindir / "gh").chmod(0o755)
         out = tmp_path / "out"
         out.write_text("")
-        proc = subprocess.run(["bash", "-e", "-c", script],
-                              env={"PATH": f"{bindir}:/usr/bin:/bin", "GITHUB_OUTPUT": str(out),
-                                   "GITHUB_REPOSITORY": f"quirq-ai/{repo}", "PR": "1"})
-        return out.read_text().strip() if proc.returncode == 0 else f"failed {proc.returncode}"
-    return clean
+        env = {"PATH": f"{bindir}:/usr/bin:/bin", "GITHUB_OUTPUT": str(out), "GITHUB_REPOSITORY": "quirq-ai/innernet",
+               "PR": "1", "BASE": "main", "HEAD_REF": "dependabot/npm_and_yarn/next-16.3.8", "SENDER": "dependabot[bot]", "TRIGGER": "dependabot[bot]", "CHANGED": "1",
+               "UPDATE_TYPE": "version-update:semver-patch", "PREV_VERSION": "16.3.7", "DEP_NAMES": "next",
+               "QQ_ALLOWED": step["env"]["QQ_ALLOWED"]}
+        subprocess.run(["bash", "-e", "-c", step["run"]], check=True, env=env)
+        return out.read_text().strip()
 
-
-def test_clean_check_accepts_only_dependency_files(tmp_path):
-    clean = _clean_check(tmp_path, "innernet")
-    assert clean(["pnpm-lock.yaml", "package.json"]) == "clean=true"
-    assert clean(["pnpm-lock.yaml", "scripts/postinstall.js"]) == "clean=false"
-    assert clean(["app/package.json"]) == "clean=false"
-    assert clean(["package.json\npnpm-lock.yaml"]) == "clean=false"  # one name with a newline
-    assert clean(['package.json"']) == "clean=false"
-
-
-def test_clean_check_globs_stay_in_their_directory(tmp_path):
-    clean = _clean_check(tmp_path, "xo-space")
-    assert clean(["requirements.txt", "requirements-dev.txt"]) == "clean=true"
-    assert clean(["requirements/x.txt"]) == "clean=false"
-    assert clean(["requirementsfoo/.github/workflows/a.txt"]) == "clean=false"
-    assert clean(['requirements".txt']) == "clean=false"  # `*` must not match an escaped quote
-
-
-def test_clean_check_needs_only_dependabot_commits(tmp_path):
-    clean = _clean_check(tmp_path, "innernet")
-    assert clean(["pnpm-lock.yaml"], bad_commits=["abc123"]) == "clean=false"
-
-
-def test_clean_check_fails_closed(tmp_path):
-    clean = _clean_check(tmp_path, "innernet")
-    assert clean([]) == "clean=false"                       # nothing listed
-    assert clean(["pnpm-lock.yaml"], gh_fails=True).startswith("failed")  # API error fails the step
+    assert run([CLEAN_COMMIT]) == "clean=true"
+    assert run([dict(CLEAN_COMMIT, committer={"login": "mallory"})]) == "clean=false"
+    assert run([CLEAN_COMMIT], head_rules=[]) == "clean=false"
 
 
 def test_nested_directory_prefixes_patterns():
     rollers = [dict(ROLLERS[1], directory="/web")]
-    assert dependabot._patterns(rollers, "innernet") == [
-        "web/package.json", "web/pnpm-lock.yaml", "web/pnpm-workspace.yaml"]
+    assert dependabot._allowed(rollers, "innernet") == [["web/package.json", "npm-manifest"],
+                                                        ["web/pnpm-lock.yaml", "npm-lock"]]
 
 
 def test_repo_without_a_slug_is_an_error():
