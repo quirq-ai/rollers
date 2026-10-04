@@ -191,3 +191,17 @@ def test_cli_write_then_check(tmp_path, capsys):
     assert main(args + ["--write"]) == 0
     assert main(args) == 0
     assert "PASS" in capsys.readouterr().out
+
+
+def test_land_workflow_passes_the_qq_drift_check():
+    """The same check infra-config's generated presubmit runs on every qq-*.yml."""
+    import hashlib
+    text = dependabot.land_workflow(ROLLERS, "innernet", COMMIT, "quirq-ai/innernet")
+    lines = text.splitlines(keepends=True)
+    want = [l[len("# qq-digest: sha256:"):].strip() for l in lines if l.startswith("# qq-digest: sha256:")]
+    body = "".join(l for l in lines if not l.startswith("# qq-digest: "))
+    assert want == [hashlib.sha256(body.encode()).hexdigest()]
+    assert yaml.safe_load(text)["name"] == "qq-roll-land"
+    edited = text.replace("timeout-minutes: 5", "timeout-minutes: 6")
+    body = "".join(l for l in edited.splitlines(keepends=True) if not l.startswith("# qq-digest: "))
+    assert want != [hashlib.sha256(body.encode()).hexdigest()]

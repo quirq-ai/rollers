@@ -11,6 +11,7 @@ The YAML is written by hand so the output is byte-stable and needs no YAML libra
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -171,7 +172,22 @@ def land_workflow(rollers: list[dict], repo: str, commit: str, slug: str) -> str
     if "${{" in source or "\nQQ_LAND_CHECK" in source:
         raise GenerateError("land_check.py cannot be embedded: it contains an expression or the heredoc end")
     body = "\n".join(("          " + line) if line else "" for line in source.rstrip("\n").split("\n"))
-    return text.replace("@@LAND_CHECK@@", body)
+    return with_digest(text.replace("@@LAND_CHECK@@", body))
+
+
+def with_digest(text: str) -> str:
+    """The file with infra-config's `# qq-digest:` line after its header comment.
+
+    Every `.github/workflows/qq-*.yml` in a gated repo must carry one: the presubmit's drift check
+    (infra-config qqcfg) hashes the file without that line and fails on a mismatch, so a hand edit to a
+    generated workflow is caught.
+    """
+    if any(line.startswith("# qq-digest: ") for line in text.splitlines()):
+        raise GenerateError("a generated workflow already contains a qq-digest line")
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    lines = text.splitlines(keepends=True)
+    at = next(i for i, line in enumerate(lines) if not line.startswith("#"))
+    return "".join(lines[:at] + [f"# qq-digest: sha256:{digest}\n"] + lines[at:])
 
 
 def generate(rollers: list[dict], commit: str, *, backend: str = "github",
