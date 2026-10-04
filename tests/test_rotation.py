@@ -316,3 +316,11 @@ def test_from_entry_needs_strings():
     from qqroll import promoted as pm
     with pytest.raises(pm.PromotedError, match="built_from is not a string"):
         pm.from_entry(entry(built_from=int("1" * 40)))
+
+
+def test_tools_never_see_the_bot_token(monkeypatch):
+    from qqroll.backends import github
+    monkeypatch.setenv("QQ_ROLLER_TOKEN", "secret")
+    monkeypatch.setenv("GH_TOKEN", "read")
+    env = github._tool_env()
+    assert "QQ_ROLLER_TOKEN" not in env and env["GH_TOKEN"] == "read" and "PATH" in env

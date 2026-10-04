@@ -79,7 +79,10 @@ jobs:
           git -C .qq/infra-config fetch -q --depth 1 https://github.com/quirq-ai/infra-config "$(cat infra-config.commit)"
           git -C .qq/infra-config checkout -q FETCH_HEAD
           printf '%s' "$ENTRIES" > "$RUNNER_TEMP/promoted.json"
-          echo "repos=$(qqroll repos --infra-config .qq/infra-config)" >> "$GITHUB_OUTPUT"
+          # An empty list would scope the bot token to every repo the App can reach, so check it.
+          repos=$(qqroll repos --infra-config .qq/infra-config)
+          [[ "$repos" =~ ^[a-z0-9][a-z0-9._-]*(,[a-z0-9][a-z0-9._-]*)*$ ]] || { echo "::error::bad repos list from qqroll repos"; exit 1; }
+          echo "repos=$repos" >> "$GITHUB_OUTPUT"
       - uses: oras-project/setup-oras@005458ad77f1c8facd38a094e4af2e69e5607ff4 # v2.0.2
       - name: bot token
         id: bot
