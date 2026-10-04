@@ -275,6 +275,10 @@ def test_the_bumped_name_must_match():
     "a:\n  b: 'x\n#'\n", "a:\n  b: {c: 1,\n  d: 2}\n", "a:\n  b: [x,\n  y]\n",        # values over lines
     'a:\n  b: "x"\n', "a:\n  b: x\\y\n", "a:\n  b: |\n    x\n", "a: &x\n  b: 1\nc: *x\n", "a: !!str 1\n",
     "a :\n  b: 1\n", "'a'b: 1\n", "a:\n  - 'x\n",
+    "a:\n  b: [x', 'y]\n", "a:\n  b: x'y\n", "a:\n  b: 'x' y\n",                       # quotes mid-word
+    "a:\n  b: [x, #]\n  c]\n", "a:\n  b: 1\n# c\n",                                    # comments
+    "a:\n  b: c\n  - d\n", "a:\n  b: c\n    d: e\n", "a:\n  b: 1\n   c: 2\n",           # scalars continued
+    "a:\n  - b\n  c: 1\n", "a:\n  - b\n    c: 1\n",                                    # items and keys mixed
 ])
 def test_an_unreadable_lockfile_is_not_clean(text):
     assert any("not a lockfile this check can read" in p for p in lock_check(text))
@@ -290,6 +294,28 @@ def test_a_lockfile_hiding_settings_in_a_multiline_value_is_not_clean():
     hidden = LOCK_HEAD.replace("settings:", "packages:\n  evil@1.0.0:\n    resolution: \'x\n\nsettings:", 1)
     hidden = hidden.replace("importers:", "#\'\nimporters:", 1)
     assert any("not a lockfile this check can read" in p for p in lock_check(hidden))
+
+
+def test_a_lockfile_hiding_settings_in_a_mid_word_quote_is_not_clean():
+    """YAML opens a quote at 'y] and reads on to the #'] line, dropping settings (review of #12)."""
+    hidden = LOCK_HEAD.replace("settings:", "packages:\n  evil@1.0.0:\n    cpu: [x', 'y]\n\nsettings:", 1)
+    hidden = hidden.replace("importers:", "#']\nimporters:", 1)
+    assert any("not a lockfile this check can read" in p for p in lock_check(hidden))
+
+
+@pytest.mark.parametrize("line", ["+    resolution: {'directory': ../evil, 'type': 'directory'}",
+                                  "+    resolution: {'repo': x, 'type': 'git'}"])
+def test_quoted_keys_do_not_get_past_the_registry_check(line):
+    files = [FILES[0], npm_file("pnpm-lock.yaml", f"@@ -1 +1 @@\n-  x\n{line}\n")]
+    assert any("non-registry resolution" in p for p in check(files=files))
+
+
+def test_peer_versions_may_move_only_to_the_new_version():
+    head = LOCK_BASE.replace("react@19.3.0", "react@19.3.1").replace(
+        "specifier: ^19.3.0\n        version: 19.3.0", "specifier: ^19.3.1\n        version: 19.3.1")
+    assert land_check.lock_problems("x", LOCK_BASE, head, "react", "19.3.0", "19.3.1") == []
+    moved = head.replace("(react@19.3.1)", "(react@99.9.9)")
+    assert any("next/version" in p for p in land_check.lock_problems("x", LOCK_BASE, moved, "react", "19.3.0", "19.3.1"))
 
 
 def test_an_escaped_tarball_is_not_clean():
