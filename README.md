@@ -24,11 +24,20 @@ Every repo that a `tool = "dependabot"` roller covers gets two generated files, 
 `generated/github/<repo>/` and copied into that repo as is:
 
 - `.github/dependabot.yml`: one update per roller, with its ecosystem, directory, cadence and open limit.
-- `.github/workflows/qq-roll-land.yml`: lands a clean Dependabot PR with no human. Clean means only
-  dependency files changed, at the roller's directory (requirements files and `pyproject.toml` for pip;
-  `package.json`, `pnpm-lock.yaml` and `pnpm-workspace.yaml` for npm), every commit is Dependabot's
-  and verified, and the bump is not a major version. The workflow turns on auto-merge, so GitHub merges
-  the PR only once the required checks pass: the roll goes through the same gate as any change.
+- `.github/workflows/qq-roll-land.yml`: lands a clean Dependabot PR with no human. The check is
+  [`src/qqroll/land_check.py`](src/qqroll/land_check.py), embedded in the workflow byte for byte. A
+  roll is clean only when all of these hold:
+  - Dependabot opened the PR and triggered this run, and the PR has exactly one commit, made by GitHub
+    for Dependabot (committer `web-flow`, verified). Author emails can be forged; these can't.
+  - Every changed file is *modified* (no adds, deletes or renames), at most 20, and is a dependency
+    file at the roller's directory: `requirements*.txt` for pip, `package.json` and `pnpm-lock.yaml`
+    for npm.
+  - Every changed line is a version: dependency version lines in `package.json`, plain pins in
+    requirements files (no index options, URLs or markers), and registry-only lockfile entries.
+  - It bumps one dependency by a patch or minor version; a minor bump from 0.x counts as major.
+  - The base branch has a required status check bound to its app, so something gates the roll.
+
+  The workflow then turns on auto-merge, so GitHub merges the PR only once the required checks pass.
   Anything else, including any failed step, turns auto-merge off and leaves the PR to a human.
 
 ```sh
@@ -37,8 +46,9 @@ qqroll dependabot --infra-config ../infra-config           # check: exit 1 if st
 ```
 
 The infra-config commit the files come from is pinned in `infra-config.commit` and recorded in each
-file's header. Admin steps the land workflow needs in each repo: "Allow auto-merge", and a ruleset
-that requires the gate check on `main` (V0-ORG-03). xo-space has no Python lockfile yet, so its pip
+file's header. Admin steps the land workflow needs in each repo: Dependabot version updates turned on
+(xo-space is a fork, so the config file alone doesn't enable them), "Allow auto-merge", and a ruleset
+that requires the gate check on `main`, bound to the app that runs it (V0-ORG-03). xo-space has no Python lockfile yet, so its pip
 rolls only move `requirements*.txt` floors, and may open no PR at all (`TODO(expert)` in
 `rollers.toml`); the done-when is shown on innernet first.
 
