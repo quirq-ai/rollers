@@ -29,3 +29,12 @@ jobs:
           python .qq/infra-config/tools/qqcfg.py validate
       - name: "V0-ROL-02: generated Dependabot config matches rollers.toml"
         run: qqroll dependabot --infra-config .qq/infra-config
+      - name: no parser of repo.toml outside qqsync (this repo)
+        run: qqsync guard .
+      - name: "V0-ROL-01: a manifest one promotion behind rolls to exactly the expected bytes"
+        run: |
+          d=$(mktemp -d)
+          cp tests/fixtures/stale.repo.toml "$d/repo.toml"
+          qqroll roll --promoted tests/fixtures/promoted.toml --manifest "$d/repo.toml" --infra-config .qq/infra-config
+          cmp "$d/repo.toml" tests/fixtures/rolled.repo.toml
+          qqroll roll --promoted tests/fixtures/promoted.toml --manifest "$d/repo.toml" | grep -q 'toolchain pins are current'
