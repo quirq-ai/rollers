@@ -675,3 +675,24 @@ def test_flow_depth_counts_nesting_not_collections():
     assert land_check._flow("{" + ", ".join(f"k{i}: [a, [b]]" for i in range(20)) + "}")["k19"] == ["a", ["b"]]
     with pytest.raises(ValueError):
         land_check._flow("[" * 9 + "x" + "]" * 9)
+
+
+@pytest.mark.parametrize("version, rng, ok", [
+    # review of #15: >X and <X.Y on partials, as npm desugars them
+    ("1.0.0-a", ">= 1.0.0-1 >0", False), ("1.0.0-1", "1.0.0-1 >0.x.0", False),
+    ("0.1.0-1", ">= 0.1.0-0.0 < 0.1", False), ("2.0.0", ">1", True), ("1.9.9", ">1", False), ("0.0.9", "<0.1", True),
+])
+def test_satisfies_partial_bounds_match_npm(version, rng, ok):
+    assert land_check.satisfies(version, rng) is ok
+
+
+@pytest.mark.parametrize("rng", [">=2+b", "1.x+b", "< = 2"])
+def test_satisfies_refuses_ranges_npm_finds_invalid(rng):
+    with pytest.raises(ValueError):
+        land_check.satisfies("10.0.2", rng)
+
+
+@pytest.mark.parametrize("text", ["{[a]: b}", "{{a: b}: c}"])
+def test_flow_keys_must_be_scalars(text):
+    with pytest.raises(ValueError):
+        land_check._flow(text)

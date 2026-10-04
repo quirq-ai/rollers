@@ -334,8 +334,10 @@ def _partial(v):
     """A range operand, 1, 1.2, 1.2.x or 1.2.3-pre: (numbers given, prerelease), or None."""
     n = r"(0|[1-9][0-9]*|[xX*])"
     m = re.fullmatch(r"v?(?:" + n + r"(?:\." + n + r")?(?:\." + n + r")?)(?:-([0-9A-Za-z.-]+))?"
-                     r"(?:\+[0-9A-Za-z.-]+)?", v)
+                     r"(\+[0-9A-Za-z.-]+)?", v)
     if not m:
+        return None
+    if m[5] and not all(p and p not in "xX*" for p in m.groups()[:3]):  # build metadata on a partial
         return None
     nums = []
     for part in m.groups()[:3]:
@@ -360,10 +362,10 @@ def _desugar(op, nums, lo):
     if not nums:  # *, x or empty: > and < match nothing, everything else anything
         return [("<", ((0, 0, 0), (0,)))] if op in (">", "<") else [(">=", lo)]
 
-    def bump(i):
+    def bump(i, pre=(0,)):
         n = nums[:i + 1]
         n[i] += 1
-        return (tuple(n + [0] * (3 - len(n))), (0,))  # the lowest prerelease: excludes all of it
+        return (tuple(n + [0] * (3 - len(n))), pre)  # (0,), the lowest prerelease: excludes all of it
     if op in ("", "="):
         if len(nums) == 3:
             return [("=", lo)]
@@ -377,10 +379,12 @@ def _desugar(op, nums, lo):
         if first is None:  # ^0, ^0.0, ^0.0.0
             return [(">=", lo), ("<", bump(len(nums) - 1))]
         return [(">=", lo), ("<", bump(first))]
-    if op == ">":
-        return [(">=", bump(len(nums) - 1))] if len(nums) < 3 else [(">", lo)]
+    if op == ">":  # >1.2 is >=1.3.0, the release
+        return [(">=", bump(len(nums) - 1, ()))] if len(nums) < 3 else [(">", lo)]
     if op == "<=":
         return [("<", bump(len(nums) - 1))] if len(nums) < 3 else [("<=", lo)]
+    if op == "<" and len(nums) < 3:  # <1.2 is <1.2.0-0, below its prereleases too
+        return [("<", (lo[0], (0,)))]
     return [(op, lo)]  # >= and <
 
 
@@ -401,7 +405,7 @@ def satisfies(version, rng):
             comps = _comparators(">=", *a) + _comparators("<=", *b)
         else:
             comps = []
-            for tok in re.sub(r"(\^|~|>=|<=|>|<|=)\s+", r"\1", alt).split() or ["*"]:
+            for tok in re.sub(r"(\^|~|>=|<=|>|<|=)\s+(?=[0-9vxX*])", r"\1", alt).split() or ["*"]:
                 m = re.fullmatch(r"(\^|~|>=|<=|>|<|=)?\s*(.+)", tok)
                 operand = _partial(m[2]) if m else None
                 if operand is None:
@@ -463,7 +467,7 @@ def _flow(text):
                 while True:
                     if open_ == "{":
                         key = value(":")
-                        if not text.startswith(": ", pos) or key in out:
+                        if not isinstance(key, str) or not text.startswith(": ", pos) or key in out:
                             raise ValueError("not a flow mapping")
                         pos += 1
                         out[key] = value(",}")
@@ -638,7 +642,7 @@ def tree_problems(shown, old, new, dep, prev, new_version, roots, registry):
             expected, written = _expected_fields(meta), _package_fields(new_p[key])
             same = all(expected.get(f) == v for f, v in written.items()) and \
                 all(f in written for f in REQUIRED_FIELDS & set(expected))
-        except ValueError:
+        except Exception:  # a field this cannot read is refused, never a crash
             same = False
         if not same:
             out.append(f"{shown}: added package {json.dumps(key)} has fields its registry manifest does not")

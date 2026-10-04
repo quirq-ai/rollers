@@ -18,7 +18,7 @@
 # TODO(expert): merges made with GITHUB_TOKEN do not trigger push workflows (post-submit); switch to
 # the quirq rollers App's token once it exists. Dependabot PRs only see Dependabot secrets.
 # TODO(expert): once owner review is required (V0-GAT-03), decide with gate how dependency-roll skips it.
-# qq-digest: sha256:bca0140c01e013c9cc4149833562cfcf1cb99ee9532ed370e21158c422e11556
+# qq-digest: sha256:3e2bea986865367b5207b08ee4d5889602a794a4e3529d798b2306c1324d20a9
 name: qq-roll-land
 on:
   pull_request:
@@ -398,8 +398,10 @@ jobs:
               """A range operand, 1, 1.2, 1.2.x or 1.2.3-pre: (numbers given, prerelease), or None."""
               n = r"(0|[1-9][0-9]*|[xX*])"
               m = re.fullmatch(r"v?(?:" + n + r"(?:\." + n + r")?(?:\." + n + r")?)(?:-([0-9A-Za-z.-]+))?"
-                               r"(?:\+[0-9A-Za-z.-]+)?", v)
+                               r"(\+[0-9A-Za-z.-]+)?", v)
               if not m:
+                  return None
+              if m[5] and not all(p and p not in "xX*" for p in m.groups()[:3]):  # build metadata on a partial
                   return None
               nums = []
               for part in m.groups()[:3]:
@@ -424,10 +426,10 @@ jobs:
               if not nums:  # *, x or empty: > and < match nothing, everything else anything
                   return [("<", ((0, 0, 0), (0,)))] if op in (">", "<") else [(">=", lo)]
 
-              def bump(i):
+              def bump(i, pre=(0,)):
                   n = nums[:i + 1]
                   n[i] += 1
-                  return (tuple(n + [0] * (3 - len(n))), (0,))  # the lowest prerelease: excludes all of it
+                  return (tuple(n + [0] * (3 - len(n))), pre)  # (0,), the lowest prerelease: excludes all of it
               if op in ("", "="):
                   if len(nums) == 3:
                       return [("=", lo)]
@@ -441,10 +443,12 @@ jobs:
                   if first is None:  # ^0, ^0.0, ^0.0.0
                       return [(">=", lo), ("<", bump(len(nums) - 1))]
                   return [(">=", lo), ("<", bump(first))]
-              if op == ">":
-                  return [(">=", bump(len(nums) - 1))] if len(nums) < 3 else [(">", lo)]
+              if op == ">":  # >1.2 is >=1.3.0, the release
+                  return [(">=", bump(len(nums) - 1, ()))] if len(nums) < 3 else [(">", lo)]
               if op == "<=":
                   return [("<", bump(len(nums) - 1))] if len(nums) < 3 else [("<=", lo)]
+              if op == "<" and len(nums) < 3:  # <1.2 is <1.2.0-0, below its prereleases too
+                  return [("<", (lo[0], (0,)))]
               return [(op, lo)]  # >= and <
 
 
@@ -465,7 +469,7 @@ jobs:
                       comps = _comparators(">=", *a) + _comparators("<=", *b)
                   else:
                       comps = []
-                      for tok in re.sub(r"(\^|~|>=|<=|>|<|=)\s+", r"\1", alt).split() or ["*"]:
+                      for tok in re.sub(r"(\^|~|>=|<=|>|<|=)\s+(?=[0-9vxX*])", r"\1", alt).split() or ["*"]:
                           m = re.fullmatch(r"(\^|~|>=|<=|>|<|=)?\s*(.+)", tok)
                           operand = _partial(m[2]) if m else None
                           if operand is None:
@@ -527,7 +531,7 @@ jobs:
                           while True:
                               if open_ == "{":
                                   key = value(":")
-                                  if not text.startswith(": ", pos) or key in out:
+                                  if not isinstance(key, str) or not text.startswith(": ", pos) or key in out:
                                       raise ValueError("not a flow mapping")
                                   pos += 1
                                   out[key] = value(",}")
@@ -702,7 +706,7 @@ jobs:
                       expected, written = _expected_fields(meta), _package_fields(new_p[key])
                       same = all(expected.get(f) == v for f, v in written.items()) and \
                           all(f in written for f in REQUIRED_FIELDS & set(expected))
-                  except ValueError:
+                  except Exception:  # a field this cannot read is refused, never a crash
                       same = False
                   if not same:
                       out.append(f"{shown}: added package {json.dumps(key)} has fields its registry manifest does not")
