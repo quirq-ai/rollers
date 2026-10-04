@@ -10,6 +10,7 @@ ALLOWED_PIP = [["requirements*.txt", "pip-requirements"]]
 ENV = {"SENDER": "dependabot[bot]", "TRIGGER": "dependabot[bot]", "CHANGED": "2",
        "UPDATE_TYPE": "version-update:semver-patch", "PREV_VERSION": "16.3.7", "DEP_NAMES": "next"}
 FILES = [npm_file(), npm_file("pnpm-lock.yaml", LOCK_PATCH)]
+PIP_ENV = {"CHANGED": "1", "DEP_NAMES": "requests"}
 
 
 def check(env=None, files=None, commits=None, rules=None, allowed=None, head_rules=None):
@@ -20,7 +21,7 @@ def check(env=None, files=None, commits=None, rules=None, allowed=None, head_rul
 
 def test_a_clean_roll_is_clean():
     assert check() == []
-    assert check(env={"CHANGED": "1"}, files=[npm_file("requirements-dev.txt", PIP_PATCH)], allowed=ALLOWED_PIP) == []
+    assert check(env=PIP_ENV, files=[npm_file("requirements-dev.txt", PIP_PATCH)], allowed=ALLOWED_PIP) == []
 
 
 # --- B-1: identity ----------------------------------------------------------------------------
@@ -88,29 +89,66 @@ def test_lockfile_must_stay_on_the_registry(line):
                                   "+-e git+https://evil/r", "+requests>=2; python_version > '3'"])
 def test_requirements_lines_must_be_pins(line):
     files = [npm_file("requirements.txt", f"@@ -1 +1 @@\n{line}\n")]
-    assert any("not a version line" in p for p in check(env={"CHANGED": "1"}, files=files, allowed=ALLOWED_PIP))
+    assert any("not a version line" in p for p in check(env=PIP_ENV, files=files, allowed=ALLOWED_PIP))
+
+
+@pytest.mark.parametrize("line", [
+    "-requests==2.32.4 # \\", "+requests==2.32.5 # \\",  # pip would join the next line into the comment
+    "+requests==2.32.5#x",                               # pip reads "#x" as part of the version
+])
+def test_requirements_comments_cannot_swallow_lines(line):
+    other = "+requests==2.32.5" if line.startswith("-") else "-requests==2.32.4"
+    files = [npm_file("requirements.txt", f"@@ -1 +1 @@\n{line}\n{other}\n")]
+    assert any("not a version line" in p for p in check(env=PIP_ENV, files=files, allowed=ALLOWED_PIP))
+
+
+@pytest.mark.parametrize("option", ["--index-url https://pypi.example/simple", "--require-hashes", "--constraint c.txt"])
+def test_a_removed_option_line_is_checked(option):
+    """A removed line starting with -- shows as ---... in the patch; it is content, not a file header."""
+    patch = f"@@ -1,2 +1 @@\n-{option}\n-requests==2.32.4\n+requests==2.32.5\n"
+    files = [npm_file("requirements.txt", patch)]
+    assert any("not a version line" in p for p in check(env=PIP_ENV, files=files, allowed=ALLOWED_PIP))
+
+
+def test_file_headers_before_the_first_hunk_are_skipped():
+    patch = "--- a/requirements.txt\n+++ b/requirements.txt\n" + PIP_PATCH
+    assert check(env=PIP_ENV, files=[npm_file("requirements.txt", patch)], allowed=ALLOWED_PIP) == []
 
 
 def test_requirements_keep_comments_and_extras():
     patch = "@@ -1 +1 @@\n-fastapi[all]>=0.141.1  # bump deliberately\n+fastapi[all]>=0.141.2  # bump deliberately\n"
     files = [npm_file("requirements.txt", patch)]
-    assert check(env={"CHANGED": "1"}, files=files, allowed=ALLOWED_PIP) == []
+    assert check(env={"CHANGED": "1", "DEP_NAMES": "fastapi"}, files=files, allowed=ALLOWED_PIP) == []
 
 
 @pytest.mark.parametrize("patch", [
     "@@ -1 +1,2 @@\n-requests==2.32.4\n+requests==2.32.5\n+evil==1.0.0\n",  # R-1: a new requirement
     "@@ -1 +1 @@\n-requests==2.32.4\n+evil==2.32.5\n",
     "@@ -0,0 +1 @@\n+evil==1.0.0\n",
+    "@@ -1 +1 @@\n-requests==2.32.4\n+requests[socks,security]==2.32.5\n",  # extras install more packages
+    "@@ -1 +1 @@\n-requests[socks]==2.32.4\n+requests[s0cks]==2.32.5\n",
+    "@@ -1 +1 @@\n-requests==2.32.4\n+requests>=0\n",                        # a pin loosened
+    "@@ -1 +1 @@\n-requests>=2.32,<3\n+requests>=2.33\n",
+    "@@ -1 +1 @@\n-requests==2.32.4  # keep\n+requests==2.32.5\n",
 ])
 def test_requirements_entries_only_change_version(patch):
     files = [npm_file("requirements.txt", patch)]
-    assert any("adds or removes entries" in p for p in check(env={"CHANGED": "1"}, files=files, allowed=ALLOWED_PIP))
+    assert any("reshapes entries" in p for p in check(env=PIP_ENV, files=files, allowed=ALLOWED_PIP))
 
 
 def test_requirements_names_compare_normalized():
     patch = "@@ -1 +1 @@\n-Typing_Extensions==4.14.0\n+typing-extensions==4.14.1\n"
     files = [npm_file("requirements.txt", patch)]
-    assert check(env={"CHANGED": "1"}, files=files, allowed=ALLOWED_PIP) == []
+    assert check(env={"CHANGED": "1", "DEP_NAMES": "typing_extensions"}, files=files, allowed=ALLOWED_PIP) == []
+
+
+def test_requirements_change_only_the_bumped_dependency():
+    patch = "@@ -1,2 +1,2 @@\n-requests==2.32.4\n-urllib3==2.5.0\n+requests==2.32.5\n+urllib3==1.26.0\n"
+    files = [npm_file("requirements.txt", patch)]
+    assert any("not the bumped dependency" in p for p in check(env=PIP_ENV, files=files, allowed=ALLOWED_PIP))
+    assert any("not the bumped dependency" in p
+               for p in check(env={"CHANGED": "1", "DEP_NAMES": ""}, files=[npm_file("requirements.txt", PIP_PATCH)],
+                              allowed=ALLOWED_PIP))
 
 
 # --- S-3: how big the bump is -----------------------------------------------------------------
@@ -141,15 +179,21 @@ def test_a_minor_bump_past_1_0_is_clean():
 ])
 def test_lockfile_non_registry_forms(line):
     files = [npm_file(), npm_file("pnpm-lock.yaml", "@@ -1 +1 @@\n-  x\n" + line + "\n")]
-    assert any("non-registry resolution" in p for p in check(env={"CHANGED": "2"}, files=files))
+    assert any("non-registry resolution" in p for p in check(env={"CHANGED": "2"}, files=files))  # npm
 
 
 @pytest.mark.parametrize("patch", [
     '@@ -1,2 +1,3 @@\n-    "next": "^16.3.7",\n+    "next": "^16.3.8",\n+    "evil": "1.0.0",\n',
     '@@ -1 +1 @@\n-    "next": "^16.3.7",\n+    "test": "0",\n',
+    '@@ -1 +1 @@\n-    "next": "^16.3.7",\n+    "next": "16.3.8",\n',   # range prefix dropped
 ])
 def test_manifest_entries_only_change_version(patch):
-    assert any("adds or removes entries" in p for p in check(files=[npm_file(patch=patch)]))
+    assert any("reshapes entries" in p for p in check(files=[npm_file(patch=patch)]))
+
+
+def test_manifest_changes_only_the_bumped_dependency():
+    patch = '@@ -1,2 +1,2 @@\n-    "next": "^16.3.7",\n-    "react": "^19.2.0",\n+    "next": "^16.3.8",\n+    "react": "^18.0.0",\n'
+    assert any("not the bumped dependency" in p for p in check(files=[npm_file(patch=patch), FILES[1]]))
 
 
 # --- S-4: something must gate it --------------------------------------------------------------

@@ -90,8 +90,9 @@ def _allowed(rollers: list[dict], repo: str) -> list[list[str]]:
 LAND_WORKFLOW = """\
 {header}# Lands a clean Dependabot roll with no human (D4). The check (quirq-ai/rollers land_check.py, embedded
 # below) requires all of: Dependabot opened and last triggered the PR; exactly one commit, made by
-# GitHub for Dependabot; only modified dependency files whose changed lines are version lines (no
-# scripts, index options, URLs or non-registry resolutions); a patch or minor bump of one dependency,
+# GitHub for Dependabot; only modified dependency files whose changed lines are version lines of the
+# bumped dependency, changing only its version numbers (no scripts, index options, URLs, extras or
+# non-registry resolutions); a patch or minor bump of one dependency,
 # where a 0.x minor counts as major; a gate on the base branch no workflow can fake (a required
 # workflow pinned by sha, or a required check bound to an app other than GitHub Actions); and rules on
 # the head branch that stop pushes to it after this check (update and non_fast_forward).
