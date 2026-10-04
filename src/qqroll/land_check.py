@@ -118,6 +118,8 @@ def _closed(text, n):
     depth, token_start, i = 0, True, 0
     while i < len(text):
         c = text[i]
+        if c in "&*!" and token_start:
+            raise bad("an anchor, alias or tag")
         if c == "'":
             if not token_start:
                 raise bad("a quote inside a word")
@@ -196,7 +198,8 @@ def lock_leaves(text):
             key, rest = m[1].replace("''", "'"), body[m.end():]
         elif ": " in body or body.endswith(":"):
             key, _, rest = body.partition(":")
-            if not re.fullmatch(r"[^'{}\[\],&*!|>%@?-][^'{}\[\],]*", key) or key != key.strip():
+            if not re.fullmatch(r"[^'{}\[\],&*!|>%@?<-][^'{}\[\],]*", key) or key != key.strip() \
+                    or (rest and not rest.startswith(" ")):
                 raise ValueError(f"line {n}: not a plain key")
         else:
             raise ValueError(f"line {n}: not a mapping entry")
@@ -243,8 +246,8 @@ def lock_problems(shown, base, head, dep, prev, new_version):
         entry_field = (len(path) == 5 and path[0] == "importers" and path[2] in LOCK_DEP_TYPES
                        and path in old and path in new and path[4] in ("specifier", "version"))
         if entry_field and path[3] == dep:
-            if path[4] == "specifier" and before and after and \
-                    _BARE_VERSION.sub("V", before) == _BARE_VERSION.sub("V", after):
+            if path[4] == "specifier" and before and after and new_version in _BARE_VERSION.findall(after) \
+                    and _BARE_VERSION.sub("V", before) == _BARE_VERSION.sub("V", after):
                 continue
             was, now = _split_version(before), _split_version(after)
             if path[4] == "version" and was and now and was[0] == prev and now[0] == new_version \

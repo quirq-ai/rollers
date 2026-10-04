@@ -255,6 +255,7 @@ def test_innernets_lockfile_shape_reads_and_bumps(tmp_path):
     (("specifier: ^16.3.8", "specifier: 16.3.8"), "importers/./dependencies/next/specifier"),  # pin reshaped
     (("version: 16.3.8(@types/node@26.6.4)(react@19.3.0)", "version: link:../next"), "importers/./dependencies/next/version"),
     (("importers:\n", "overrides:\n  react: 18.0.0\n\nimporters:\n"), "overrides/react"),
+    (("specifier: ^16.3.8", "specifier: ^99.0.0"), "importers/./dependencies/next/specifier"),  # not the new version
     (("version: 16.3.8(@types", "version: 15.0.0(@types"), "importers/./dependencies/next/version"),  # downgrade
     (("version: 16.3.8(@types", "version: 17.0.0(@types"), "importers/./dependencies/next/version"),  # major
     (("(react@19.3.0)\n      react:", "(evil@1.0.0)\n      react:"), "importers/./dependencies/next/version"),
@@ -279,6 +280,7 @@ def test_the_bumped_name_must_match():
     "a:\n  b: [x, #]\n  c]\n", "a:\n  b: 1\n# c\n",                                    # comments
     "a:\n  b: c\n  - d\n", "a:\n  b: c\n    d: e\n", "a:\n  b: 1\n   c: 2\n",           # scalars continued
     "a:\n  - b\n  c: 1\n", "a:\n  - b\n    c: 1\n",                                    # items and keys mixed
+    "a:\n  b:c: d\n", "a:\n  <<: {x: 1}\n", "a:\n  b: [&x 1]\n", "a:\n  b: [*x]\n", "a:\n  b: {c: !t 1}\n",
 ])
 def test_an_unreadable_lockfile_is_not_clean(text):
     assert any("not a lockfile this check can read" in p for p in lock_check(text))
