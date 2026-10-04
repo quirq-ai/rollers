@@ -90,8 +90,9 @@ def _allowed(rollers: list[dict], repo: str) -> list[list[str]]:
 LAND_WORKFLOW = """\
 {header}# Lands a clean Dependabot roll with no human (D4). The check (quirq-ai/rollers land_check.py, embedded
 # below) requires all of: Dependabot opened and last triggered the PR; exactly one commit, made by
-# GitHub for Dependabot; only modified dependency files whose changed lines are version lines (no
-# scripts, index options, URLs or non-registry resolutions); a patch or minor bump of one dependency,
+# GitHub for Dependabot; only modified dependency files whose changed lines are version lines of the
+# bumped dependency, changing only its version numbers (no scripts, index options, URLs, extras or
+# non-registry resolutions); a patch or minor bump of one dependency,
 # where a 0.x minor counts as major; a gate on the base branch no workflow can fake (a required
 # workflow pinned by sha, or a required check bound to an app other than GitHub Actions); and rules on
 # the head branch that stop pushes to it after this check (update and non_fast_forward).
@@ -101,7 +102,7 @@ LAND_WORKFLOW = """\
 # does not turn them on), "Allow auto-merge", a ruleset that requires the gate on main (V0-ORG-03),
 # and a ruleset restricting updates and force pushes to dependabot/** with only Dependabot exempt.
 # TODO(expert): merges made with GITHUB_TOKEN do not trigger push workflows (post-submit); switch to
-# the quirq infra bot's token once it exists. Dependabot PRs only see Dependabot secrets.
+# the quirq rollers App's token once it exists. Dependabot PRs only see Dependabot secrets.
 # TODO(expert): once owner review is required (V0-GAT-03), decide with gate how dependency-roll skips it.
 name: qq-roll-land
 on:
