@@ -14,8 +14,7 @@ import urllib.request
 API = "https://api.github.com"
 
 
-class BackendError(Exception):
-    pass
+from qqroll.backends import BackendError
 
 
 def _urllib_request(method: str, url: str, headers: dict, body: bytes | None) -> tuple[int, bytes]:
@@ -65,8 +64,13 @@ class Backend:
     def default_branch(self, repo: str) -> str:
         return self._call("GET", self._repo(repo))[1]["default_branch"]
 
+    def head(self, repo: str, branch: str) -> str:
+        """The commit `branch` points at."""
+        q = urllib.parse.quote(branch)
+        return self._call("GET", f"{self._repo(repo)}/git/ref/heads/{q}")[1]["object"]["sha"]
+
     def read_file(self, repo: str, path: str, ref: str) -> str | None:
-        """The file's text at `ref`, or None if the repo has no such file."""
+        """The file's text at `ref` (a branch or commit), or None if the repo has no such file."""
         q = urllib.parse.quote(path)
         status, data = self._call("GET", f"{self._repo(repo)}/contents/{q}?ref={urllib.parse.quote(ref)}",
                                   ok=(200, 404))
@@ -78,44 +82,66 @@ class Backend:
 
     # --- writing ---------------------------------------------------------------------------------
 
-    def open_roll(self, repo: str, *, base: str, branch: str, path: str, text: str, title: str,
-                  body: str, auto_merge: bool = False) -> tuple[str, list[str]]:
-        """Commit `text` to `path` on `branch` (reset onto `base`), and open or update its PR.
+    def open_roll(self, repo: str, *, base: str, base_sha: str, branch: str, path: str, text: str,
+                  title: str, body: str, auto_merge: bool = False) -> tuple[str, list[str]]:
+        """Commit `text` to `path` on `branch`, on top of `base_sha` (the commit `text` was rolled
+        from), and open or update its PR. Returns the PR URL and any warnings.
 
-        Returns the PR URL and any warnings. The branch belongs to the roller and is force-moved, so
-        a stale roll is replaced rather than stacked on.
+        The branch belongs to the roller and is force-moved, so a stale roll is replaced rather than
+        stacked on. When the branch already holds exactly this roll, nothing is pushed, so the gate is
+        not re-run and approvals stay.
         """
         r = self._repo(repo)
+        q = urllib.parse.quote(branch)
         warnings: list[str] = []
-        base_sha = self._call("GET", f"{r}/git/ref/heads/{urllib.parse.quote(base)}")[1]["object"]["sha"]
         base_tree = self._call("GET", f"{r}/git/commits/{base_sha}")[1]["tree"]["sha"]
         tree = self._call("POST", f"{r}/git/trees", {
             "base_tree": base_tree,
             "tree": [{"path": path, "mode": "100644", "type": "blob", "content": text}]})[1]["sha"]
-        commit = self._call("POST", f"{r}/git/commits",
-                            {"message": f"{title}\n\n{body}", "tree": tree, "parents": [base_sha]})[1]["sha"]
-        status, _ = self._call("PATCH", f"{r}/git/refs/heads/{urllib.parse.quote(branch)}",
-                               {"sha": commit, "force": True}, ok=(200, 404, 422))
-        if status != 200:
-            self._call("POST", f"{r}/git/refs", {"ref": f"refs/heads/{branch}", "sha": commit})
-        head = urllib.parse.quote(f"{self._slug(repo).split('/')[0]}:{branch}")
-        prs = self._call("GET", f"{r}/pulls?state=open&head={head}")[1]
+        status, ref = self._call("GET", f"{r}/git/ref/heads/{q}", ok=(200, 404))
+        current = ref["object"]["sha"] if status == 200 else None
+        unchanged = False
+        if current:
+            commit = self._call("GET", f"{r}/git/commits/{current}")[1]
+            unchanged = (commit["tree"]["sha"] == tree
+                         and [p["sha"] for p in commit.get("parents", [])] == [base_sha])
+        if unchanged:
+            head_sha = current
+        else:
+            head_sha = self._call("POST", f"{r}/git/commits", {"message": f"{title}\n\n{body}", "tree": tree,
+                                                                "parents": [base_sha]})[1]["sha"]
+            if current:
+                self._call("PATCH", f"{r}/git/refs/heads/{q}", {"sha": head_sha, "force": True})
+            else:
+                self._call("POST", f"{r}/git/refs", {"ref": f"refs/heads/{branch}", "sha": head_sha})
+        owner = self._slug(repo).split("/")[0]
+        prs = self._call("GET", f"{r}/pulls?state=open&head={urllib.parse.quote(f'{owner}:{branch}')}")[1]
+        had_auto_merge = bool(prs and prs[0].get("auto_merge"))
         if prs:
-            pr = self._call("PATCH", f"{r}/pulls/{prs[0]['number']}", {"title": title, "body": body})[1]
+            pr = prs[0]
+            if not unchanged:
+                pr = self._call("PATCH", f"{r}/pulls/{pr['number']}", {"title": title, "body": body})[1]
         else:
             pr = self._call("POST", f"{r}/pulls", {"title": title, "body": body, "head": branch, "base": base})[1]
         if auto_merge:
-            warning = self._enable_auto_merge(pr["node_id"])
-            if warning:
-                warnings.append(f"{pr['html_url']}: auto-merge not enabled ({warning}); the roll waits for a human")
+            problem = self._graphql(
+                "mutation($id: ID!, $oid: GitObjectID!) { enablePullRequestAutoMerge(input: "
+                "{pullRequestId: $id, expectedHeadOid: $oid, mergeMethod: SQUASH}) { clientMutationId } }",
+                {"id": pr["node_id"], "oid": head_sha})  # TODO(suraj): squash or merge (plan §10.3)
+            if problem:
+                warnings.append(f"{pr['html_url']}: auto-merge not enabled ({problem}); the roll waits for a human")
+        elif had_auto_merge:
+            # Auto-merge was not asked for: don't let new roll content land on an older setting.
+            problem = self._graphql("mutation($id: ID!) { disablePullRequestAutoMerge(input: "
+                                    "{pullRequestId: $id}) { clientMutationId } }", {"id": pr["node_id"]})
+            if problem:
+                warnings.append(f"{pr['html_url']}: could not turn auto-merge off ({problem})")
         return pr["html_url"], warnings
 
-    def _enable_auto_merge(self, node_id: str) -> str | None:
-        """Turn on auto-merge, so GitHub lands the PR once the gate passes. A reason on failure."""
-        query = ("mutation($id: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, "
-                 "mergeMethod: SQUASH}) { clientMutationId } }")  # TODO(suraj): squash or merge (plan §10.3)
+    def _graphql(self, query: str, variables: dict) -> str | None:
+        """Run a mutation. A reason on failure, else None."""
         try:
-            _, data = self._call("POST", "/graphql", {"query": query, "variables": {"id": node_id}})
+            _, data = self._call("POST", "/graphql", {"query": query, "variables": variables})
         except BackendError as e:
             return str(e)
         errors = data.get("errors")

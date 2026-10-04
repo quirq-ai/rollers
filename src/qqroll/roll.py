@@ -17,13 +17,13 @@ from qqroll.promoted import Promoted
 @dataclass(frozen=True)
 class Change:
     toolchain: str
-    platform: str | None   # None for a pin that covers every platform
+    platform: str
     old_digest: str
     new: Promoted
 
     def __str__(self) -> str:
-        where = f"{self.toolchain} ({self.platform})" if self.platform else self.toolchain
-        return f"{where}: {self.old_digest} -> {self.new.digest} ({self.new.version}-r{self.new.revision})"
+        return (f"{self.toolchain} ({self.platform}): {self.old_digest} -> {self.new.digest} "
+                f"({self.new.version}-r{self.new.revision})")
 
 
 @dataclass
@@ -60,34 +60,46 @@ def plan(text: str, promoted: list[Promoted], *, source: str = "infra/repo.toml"
     by_key = {(p.name, p.platform): p for p in promoted}
     for name in sorted(pins):
         pin = pins[name]
-        if "platforms" in pin:
-            targets = [(platform, pin["platforms"][platform]) for platform in sorted(pin["platforms"])]
-        else:
-            targets = [(None, pin)]
-        for platform, current in targets:
-            new = by_key.get((name, platform)) if platform else _single(promoted, name)
+        if "platforms" not in pin:
+            if any(p.name == name for p in promoted):
+                roll.skipped.append(f"{name}: pinned once for every platform, but toolchains promotes one "
+                                    "image per platform; pin it per platform to have it rolled")
+            continue
+        platforms = pin["platforms"]
+        rolls = []                   # (platform, current digest, promotion)
+        version_at = {}              # platform -> promoted version its digest will be at, or None
+        for platform in sorted(platforms):
+            current = platforms[platform]
+            new = by_key.get((name, platform))
+            version_at[platform] = None
             if new is None:
                 continue  # nothing promoted for this toolchain on this platform
             if current.get("source") != new.source:
-                roll.skipped.append(f"{name}: source {current.get('source')!r} is not {new.source!r}; "
-                                    "not a quirq-ai/toolchains pin")
+                roll.skipped.append(f"{name} ({platform}): source {current.get('source')!r} is not "
+                                    f"{new.source!r}; not a quirq-ai/toolchains pin")
                 continue
             if current["digest"] == new.digest:
+                version_at[platform] = new.version
                 continue
             if not _track_allows(name, new.version, kinds_pins):
-                roll.skipped.append(f"{name}: promoted {new.version} is outside the kinds.toml pin "
-                                    f"{kinds_pins[name]!r}; moving that pin is a policy change for suraj")
+                roll.skipped.append(f"{name} ({platform}): promoted {new.version} is outside the kinds.toml "
+                                    f"pin {kinds_pins[name]!r}; moving that pin is a policy change for suraj")
                 continue
-            manifest.set_pin("toolchains", name, digest=new.digest, version=new.version, platform=platform)
-            roll.changes.append(Change(name, platform, current["digest"], new))
+            rolls.append((platform, current["digest"], new))
+            version_at[platform] = new.version
+        if not rolls:
+            continue
+        # `version` labels the whole toolchain, so it moves only when every platform ends up at one version.
+        versions = set(version_at.values())
+        version = versions.pop() if len(versions) == 1 and None not in versions else None
+        if version is None:
+            roll.skipped.append(f"{name}: version label left at {pin.get('version')!r}; its platforms are "
+                                "not all at one promoted version")
+        for platform, old_digest, new in rolls:
+            manifest.set_pin("toolchains", name, digest=new.digest, version=version, platform=platform)
+            roll.changes.append(Change(name, platform, old_digest, new))
     roll.new_text = manifest.dumps()
     return roll
-
-
-def _single(promoted: list[Promoted], name: str) -> Promoted | None:
-    """For a pin that covers every platform: the promotion, if there is exactly one for `name`."""
-    matches = [p for p in promoted if p.name == name]
-    return matches[0] if len(matches) == 1 else None
 
 
 __all__ = ["Change", "Roll", "plan", "ManifestError"]

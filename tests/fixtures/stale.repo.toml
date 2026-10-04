@@ -1,5 +1,6 @@
 # Fixture: a manifest one toolchain promotion behind. The python pin is an older digest, the node
-# pin is current, and the deps pin is not a toolchain, so a roll changes exactly one line.
+# pin is current, and the deps pin is not a toolchain, so a roll changes only python's version
+# and digest lines.
 schema = "quirq-repo/1"
 
 [qq]

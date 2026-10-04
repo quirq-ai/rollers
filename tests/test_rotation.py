@@ -19,10 +19,10 @@ ROLLERS = [{"name": "toolchains", "repos": ["xo-space", "innernet"], "moves": "t
 class FakeGitHub:
     """Just enough of the GitHub REST and GraphQL APIs, recording every call."""
 
-    def __init__(self, files: dict[str, str], branch_exists=False, open_pr=False, auto_merge_error=None):
+    def __init__(self, files: dict[str, str], branch_tree=None, open_pr=None, auto_merge_error=None):
         self.files = files
-        self.branch_exists = branch_exists
-        self.open_pr = open_pr
+        self.branch_tree = branch_tree   # tree sha of the roll branch's commit, or None if no branch
+        self.open_pr = open_pr           # the open roll PR, or None
         self.auto_merge_error = auto_merge_error
         self.calls = []
 
@@ -35,25 +35,30 @@ class FakeGitHub:
         if method == "GET" and path.count("/") == 3:
             return ok({"default_branch": "main"})
         if "/contents/" in path:
+            assert path.endswith("?ref=basesha"), "manifest must be read at the base commit"
             repo = path.split("/")[3]
             if repo not in self.files:
                 return ok({"message": "Not Found"}, 404)
             return ok({"type": "file", "encoding": "base64",
                        "content": base64.b64encode(self.files[repo].encode()).decode()})
         if path.endswith("/git/ref/heads/main"):
-            return ok({"object": {"sha": "base"}})
-        if "/git/commits/base" in path:
+            return ok({"object": {"sha": "basesha"}})
+        if path.endswith("/git/ref/heads/qq-roll/toolchains"):
+            return ok({"object": {"sha": "branchsha"}}) if self.branch_tree else ok({"message": "Not Found"}, 404)
+        if path.endswith("/git/commits/basesha"):
             return ok({"tree": {"sha": "basetree"}})
+        if path.endswith("/git/commits/branchsha"):
+            return ok({"tree": {"sha": self.branch_tree}, "parents": [{"sha": "basesha"}]})
         if path.endswith("/git/trees"):
-            return ok({"sha": "tree"}, 201)
-        if path.endswith("/git/commits"):
-            return ok({"sha": "commit"}, 201)
+            return ok({"sha": "newtree"}, 201)
+        if path.endswith("/git/commits") and method == "POST":
+            return ok({"sha": "newcommit"}, 201)
         if "/git/refs/heads/" in path and method == "PATCH":
-            return ok({}) if self.branch_exists else ok({"message": "Reference does not exist"}, 422)
+            return ok({})
         if path.endswith("/git/refs"):
             return ok({}, 201)
         if "/pulls?" in path:
-            return ok([{"number": 7}] if self.open_pr else [])
+            return ok([self.open_pr] if self.open_pr else [])
         if "/pulls" in path:
             return ok({"number": 7, "node_id": "PR_7", "html_url": "https://github.com/quirq-ai/x/pull/7"},
                       200 if method == "PATCH" else 201)
@@ -62,6 +67,13 @@ class FakeGitHub:
                 return ok({"errors": [{"message": self.auto_merge_error}]})
             return ok({"data": {}})
         raise AssertionError(f"unexpected call {method} {path}")
+
+
+OPEN_PR = {"number": 7, "node_id": "PR_7", "html_url": "https://github.com/quirq-ai/x/pull/7", "auto_merge": None}
+
+
+def writes(fake):
+    return [(m, path) for m, path, *_ in fake.calls if m in ("POST", "PATCH")]
 
 
 def run(fake, apply=True, kinds_pins=None, auto_merge=True):
@@ -75,7 +87,7 @@ def test_repo_without_a_manifest_is_skipped():
     report = run(fake)
     assert report.prs == []
     assert all("no infra/repo.toml on main yet" in line for line in report.lines)
-    assert not any(m in ("POST", "PATCH") for m, *_ in fake.calls)
+    assert writes(fake) == []
 
 
 def test_current_manifest_opens_nothing():
@@ -92,13 +104,14 @@ def test_stale_manifest_gets_one_roll_pr_with_exactly_the_rolled_text():
     tree = next(p for m, path, p, _ in fake.calls if path.endswith("/git/trees"))
     assert tree["tree"] == [{"path": "infra/repo.toml", "mode": "100644", "type": "blob", "content": ROLLED}]
     commit = next(p for m, path, p, _ in fake.calls if path.endswith("/git/commits") and m == "POST")
-    assert commit["parents"] == ["base"] and commit["message"].startswith("roll: toolchains python 3.14.8-r1")
+    assert commit["parents"] == ["basesha"] and commit["message"].startswith("roll: toolchains python 3.14.8-r1")
     created = next(p for m, path, p, _ in fake.calls if path.endswith("/git/refs"))
-    assert created == {"ref": "refs/heads/qq-roll/toolchains", "sha": "commit"}
+    assert created == {"ref": "refs/heads/qq-roll/toolchains", "sha": "newcommit"}
     pr = next(p for m, path, p, _ in fake.calls if m == "POST" and path.endswith("/pulls"))
     assert pr["head"] == "qq-roll/toolchains" and pr["base"] == "main"
     assert "dependency-roll" in pr["body"] and "toolchains@d020ec6" in pr["body"]
-    assert any(path == "/graphql" for _, path, _, _ in fake.calls)
+    mutation = next(p for _, path, p, _ in fake.calls if path == "/graphql")
+    assert "enablePullRequestAutoMerge" in mutation["query"] and mutation["variables"]["oid"] == "newcommit"
     assert all(auth == "Bearer t" for *_, auth in fake.calls)
 
 
@@ -112,11 +125,44 @@ def test_auto_merge_is_off_by_default():
 
 
 def test_existing_roll_is_refreshed_not_duplicated():
-    fake = FakeGitHub({"xo-space": STALE}, branch_exists=True, open_pr=True)
+    fake = FakeGitHub({"xo-space": STALE}, branch_tree="oldtree", open_pr=OPEN_PR)
     run(fake)
-    methods = [(m, path.rsplit("/", 2)[-2:]) for m, path, *_ in fake.calls]
-    assert ("PATCH", ["pulls", "7"]) in methods
-    assert not any(m == "POST" and path.endswith(("/pulls", "/git/refs")) for m, path, *_ in fake.calls)
+    assert ("PATCH", "/repos/quirq-ai/xo-space/git/refs/heads/qq-roll/toolchains") in writes(fake)
+    assert ("PATCH", "/repos/quirq-ai/xo-space/pulls/7") in writes(fake)
+    assert not any(m == "POST" and path.endswith(("/pulls", "/git/refs")) for m, path in writes(fake))
+
+
+def test_identical_roll_pushes_nothing():
+    fake = FakeGitHub({"xo-space": STALE}, branch_tree="newtree", open_pr=OPEN_PR)
+    report = run(fake, auto_merge=False)
+    assert report.prs == ["https://github.com/quirq-ai/x/pull/7"]
+    assert [w for w in writes(fake) if w[1] != "/repos/quirq-ai/xo-space/git/trees"] == []
+
+
+def test_earlier_auto_merge_is_turned_off_when_not_asked_for():
+    fake = FakeGitHub({"xo-space": STALE}, branch_tree="oldtree", open_pr=dict(OPEN_PR, auto_merge={"x": 1}))
+    run(fake, auto_merge=False)
+    mutation = next(p for _, path, p, _ in fake.calls if path == "/graphql")
+    assert "disablePullRequestAutoMerge" in mutation["query"]
+
+
+def test_one_failing_repo_does_not_stop_the_others():
+    fake = FakeGitHub({"xo-space": STALE, "innernet": STALE})
+    def flaky(method, url, headers, body):
+        if "/innernet" in url:
+            return 502, b'{"message": "Bad gateway"}'
+        return fake(method, url, headers, body)
+    report = rotation.run(Backend(token="t", request=flaky), ROLLERS, PROMOTED, kinds_pins=None,
+                          promoted_from="p", rollers_commit="r", apply=True)
+    assert report.failed and "innernet: not rolled" in report.warnings[0]
+    assert report.prs == ["https://github.com/quirq-ai/x/pull/7"]
+
+
+def test_manifest_path_comes_from_config():
+    fake = FakeGitHub({"xo-space": STALE})
+    rotation.run(Backend(token="t", request=fake), ROLLERS, PROMOTED, kinds_pins=None, promoted_from="p",
+                 rollers_commit="r", apply=False, manifests={"xo-space": "build/repo.toml"})
+    assert any("/contents/build/repo.toml" in path for _, path, *_ in fake.calls)
 
 
 def test_auto_merge_refusal_is_a_warning():
@@ -128,7 +174,7 @@ def test_auto_merge_refusal_is_a_warning():
 def test_dry_run_writes_nothing_and_shows_the_diff():
     fake = FakeGitHub({"xo-space": STALE})
     report = run(fake, apply=False)
-    assert not any(m in ("POST", "PATCH") for m, *_ in fake.calls)
+    assert writes(fake) == []
     text = "\n".join(report.lines)
     assert "+version = \"3.14.8\"" in text and "dry run" in text
 

@@ -66,14 +66,37 @@ def test_roll_stays_inside_the_kinds_pin():
     assert not roll.plan(STALE, PROMOTED, kinds_pins={"python": "3.1"}).changed
 
 
-def test_roll_single_pin_for_all_platforms():
+def test_roll_skips_a_pin_for_every_platform():
     text = (
         'schema = "quirq-repo/1"\n[toolchains.python]\nversion = "3.14.7"\n'
         'source = "oci://ghcr.io/quirq-ai/toolchains/python"\n'
         'digest = "sha256:' + "1" * 64 + '"\n[[targets]]\nname = "a"\nkind = "k"\n')
     r = roll.plan(text, PROMOTED)
-    assert r.changes[0].platform is None
-    assert f'digest = "{NEW_PY}"' in r.new_text and 'version = "3.14.8"' in r.new_text
+    assert not r.changed
+    assert "pin it per platform" in r.skipped[0]
+
+
+TWO_PLATFORMS = (
+    'schema = "quirq-repo/1"\n[toolchains.python]\nversion = "3.14.7"\n'
+    'platforms."linux-x86_64" = { source = "oci://ghcr.io/quirq-ai/toolchains/python", digest = "sha256:'
+    + "1" * 64 + '" }\n'
+    'platforms."macos-arm64" = { source = "oci://ghcr.io/quirq-ai/toolchains/python", digest = "sha256:'
+    + "2" * 64 + '" }\n[[targets]]\nname = "a"\nkind = "k"\n')
+
+
+def test_version_label_stays_when_platforms_would_disagree():
+    r = roll.plan(TWO_PLATFORMS, PROMOTED)  # only linux-x86_64 is promoted
+    assert [c.platform for c in r.changes] == ["linux-x86_64"]
+    assert 'version = "3.14.7"' in r.new_text and NEW_PY in r.new_text
+    assert "version label left at '3.14.7'" in r.skipped[0]
+
+
+def test_version_label_moves_when_every_platform_reaches_it():
+    mac = promoted.Promoted("python", "3.14.8", 1, "macos-arm64", "oci://ghcr.io/quirq-ai/toolchains/python",
+                            "sha256:" + "3" * 64)
+    r = roll.plan(TWO_PLATFORMS, PROMOTED + [mac])
+    assert [c.platform for c in r.changes] == ["linux-x86_64", "macos-arm64"]
+    assert 'version = "3.14.8"' in r.new_text and r.skipped == []
 
 
 def test_roll_does_not_add_toolchains_the_manifest_lacks():

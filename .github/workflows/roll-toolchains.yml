@@ -8,7 +8,7 @@
 # trigger no workflows, so they would never be gated. Until the App's secrets exist, this runs as a
 # dry run and prints the diffs it would open.
 # TODO(suraj): create the quirq infra bot App (contents + pull requests write on the product repos)
-# and add its app id and private key as QQ_BOT_APP_ID and QQ_BOT_PRIVATE_KEY.
+# and add its client id and private key as QQ_BOT_CLIENT_ID and QQ_BOT_PRIVATE_KEY.
 # TODO(expert): have toolchains' promote workflow send repository_dispatch (toolchain-promoted) once
 # it can use the bot, so rolls start on promotion instead of on the weekly check.
 name: roll-toolchains
@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
-      HAS_BOT: ${{ secrets.QQ_BOT_APP_ID != '' }}   # secrets are not readable in a step's `if`
+      HAS_BOT: ${{ secrets.QQ_BOT_CLIENT_ID != '' }}   # secrets are not readable in a step's `if`
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -48,16 +48,20 @@ jobs:
         if: env.HAS_BOT == 'true'
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.QQ_BOT_APP_ID }}
+          client-id: ${{ secrets.QQ_BOT_CLIENT_ID }}
           private-key: ${{ secrets.QQ_BOT_PRIVATE_KEY }}
           owner: quirq-ai
+          repositories: xo-space,innernet   # the repos rollers.toml's toolchains roller covers
+          permission-contents: write
+          permission-pull-requests: write
       - name: roll
         env:
           QQ_ROLLER_TOKEN: ${{ steps.bot.outputs.token }}
+          QQ_READ_TOKEN: ${{ github.token }}   # dry runs read public repos without the shared IP rate limit
         run: |
           apply=
           if [ -n "$QQ_ROLLER_TOKEN" ]; then apply=--apply
-          else echo "::warning::no quirq infra bot token (QQ_BOT_APP_ID); dry run only"; fi
+          else echo "::warning::no quirq infra bot token (QQ_BOT_CLIENT_ID); dry run only"; fi
           qqroll rotation --infra-config .qq/infra-config --promoted .qq/toolchains/promoted.toml \
             --promoted-from "quirq-ai/toolchains@${{ steps.src.outputs.toolchains }}" \
             --rollers-commit "quirq-ai/rollers@$GITHUB_SHA" $apply

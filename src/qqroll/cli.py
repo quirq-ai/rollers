@@ -74,10 +74,11 @@ def cmd_rotation(args) -> int:
     import os
 
     from qqroll import backends, dependabot, promoted, rotation
-    from qqroll.backends.github import BackendError
+    from qqroll.backends import BackendError
     from qqroll.config import ConfigError, load, rollers, toolchain_pins
 
     token = os.environ.get("QQ_ROLLER_TOKEN") or None
+    read_token = token or os.environ.get("QQ_READ_TOKEN") or None  # dry runs read with any token
     if args.apply and not token:
         print("qqroll: --apply needs QQ_ROLLER_TOKEN, the quirq infra bot's token. PRs opened with a "
               "workflow's GITHUB_TOKEN trigger no workflows, so they would never be gated.", file=sys.stderr)
@@ -86,10 +87,12 @@ def cmd_rotation(args) -> int:
         cfg = load(args.infra_config)
         new = promoted.parse(Path(args.promoted).read_text(), args.promoted)
         name = args.backend or cfg.get("org", {}).get("org", {}).get("default_backend", "github")
-        backend = backends.load(name, token=token, slugs=dependabot.github_slugs(cfg))
+        backend = backends.load(name, token=token if args.apply else read_token, slugs=dependabot.github_slugs(cfg))
         report = rotation.run(backend, rollers(cfg), new, kinds_pins=toolchain_pins(cfg),
                               promoted_from=args.promoted_from, rollers_commit=args.rollers_commit,
-                              apply=args.apply, auto_merge=args.auto_merge)
+                              apply=args.apply, auto_merge=args.auto_merge,
+                              manifests={r["name"]: r["manifest"] for r in cfg.get("repos", {}).get("repo", [])
+                                         if "manifest" in r})
     except (OSError, ValueError, ConfigError, promoted.PromotedError, BackendError) as e:
         print(f"qqroll: {e}", file=sys.stderr)
         return 1
@@ -97,7 +100,7 @@ def cmd_rotation(args) -> int:
         print(line)
     for w in report.warnings:
         print(f"warning: {w}", file=sys.stderr)
-    return 0
+    return 1 if report.failed else 0
 
 
 def build_parser() -> argparse.ArgumentParser:

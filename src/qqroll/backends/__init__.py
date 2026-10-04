@@ -5,6 +5,10 @@ from __future__ import annotations
 import importlib
 
 
+class BackendError(Exception):
+    """A forge call failed. The message says which call and why."""
+
+
 def load(name: str, **kwargs):
     try:
         module = importlib.import_module(f"qqroll.backends.{name}")
