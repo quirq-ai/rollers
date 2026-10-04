@@ -286,6 +286,7 @@ def lock_problems(shown, base, head, dep, prev, new_version, registry=None):
 PACKAGE_FIELDS = {"resolution", "engines", "cpu", "os", "libc", "hasBin", "deprecated", "peerDependencies",
                   "peerDependenciesMeta", "bundledDependencies"}
 SNAPSHOT_FIELDS = {"dependencies", "optionalDependencies", "transitivePeerDependencies", "optional"}
+REQUIRED_FIELDS = {"engines", "os", "cpu", "hasBin"}
 MAX_ADDED = 400  # added packages plus snapshots; each costs a registry request
 _PKG_NAME = r"(?:@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*"
 _PKG_KEY = re.compile(r"(" + _PKG_NAME + r")@(" + _VERSION + r")")
@@ -414,7 +415,7 @@ def _odd_entry(entry):
 def _flow(text):
     """pnpm's flow values ({k: v, ...}, [a, ...], 'quoted' and plain scalars) as dicts, lists and
     strings. Raises ValueError on anything else."""
-    text, pos = text.strip(), 0
+    text, pos, depth = text.strip(), 0, 0
 
     def ws():
         nonlocal pos
@@ -422,8 +423,12 @@ def _flow(text):
             pos += 1
 
     def value(stop):
-        nonlocal pos
+        nonlocal pos, depth
         ws()
+        if text.startswith(("{", "["), pos):
+            depth += 1
+            if depth > 8:
+                raise ValueError("nested too deep")
         for open_, close in (("{", "}"), ("[", "]")):
             if text.startswith(open_, pos):
                 pos += 1
@@ -511,6 +516,12 @@ def _edges(entry):
             if len(path) == 2 and path[0] in ("dependencies", "optionalDependencies")]
 
 
+def _target(name, value):
+    """The snapshot key an edge or importer version points at: `name@value`, or the value itself for an
+    alias (pnpm writes `foo: is-number@7.0.0` for "foo": "npm:is-number@7.0.0")."""
+    return value if _SNAPSHOT_KEY.fullmatch(value) and not _split_version(value) else f"{name}@{value}"
+
+
 def _walk(snapshots, starts, required_only=False):
     """Snapshot keys reachable from `starts` (following only non-optional edges if asked)."""
     seen, todo = set(), list(starts)
@@ -521,7 +532,7 @@ def _walk(snapshots, starts, required_only=False):
         seen.add(key)
         for kind, name, value in _edges(snapshots.get(key, {})):
             if not (required_only and kind == "optionalDependencies"):
-                todo.append(f"{name}@{value}")
+                todo.append(_target(name, value))
     return seen
 
 
@@ -543,16 +554,16 @@ def tree_problems(shown, old, new, dep, prev, new_version, roots, registry):
         return [f"{shown}: adds {len(added_p) + len(added_s)} lockfile entries, more than {MAX_ADDED} checked"]
 
     # Reachability first, so nothing unreachable costs a registry request.
+    starts = [_target(path[3], value) for path, value in new.items()
+              if len(path) == 5 and path[0] == "importers" and path[4] == "version" and value]
     seen = _walk(new_s, [r for r in roots if r in new_s])
-    required = _walk(new_s, [r for r in roots if r in new_s], required_only=True)
+    required = _walk(new_s, starts, required_only=True)
     reached = {_package_of(k) for k in seen} - {None}
     unreachable = {k for k in added_p if k not in reached} | {k for k in added_s if k not in seen}
     for key in sorted(unreachable):
         out.append(f"{shown}: added entry {json.dumps(key)} is not in the bumped dependency's closure")
 
     # Nothing removed may still be in use: walk from every importer entry of the new lockfile.
-    starts = [f"{path[3]}@{value}" for path, value in new.items()
-              if len(path) == 5 and path[0] == "importers" and path[4] == "version" and value]
     in_use = _walk(new_s, starts)
     for key in sorted(set(old_s) - set(new_s)):
         if key in in_use:
@@ -595,11 +606,12 @@ def tree_problems(shown, old, new, dep, prev, new_version, roots, registry):
         if (meta.get("dist") or {}).get("integrity") != resolution[1]:
             out.append(f"{shown}: added package {json.dumps(key)} does not have the registry's integrity")
             continue
-        # pnpm may leave a field out (some versions drop libc), which only installs more; a field it
-        # writes must say what the registry says.
+        # A field written must say what the registry says. pnpm may leave out libc, deprecated and the
+        # peer fields (some versions drop libc), but not what decides whether and how it installs.
         try:
-            expected = _expected_fields(meta)
-            same = all(expected.get(f) == v for f, v in _package_fields(new_p[key]).items())
+            expected, written = _expected_fields(meta), _package_fields(new_p[key])
+            same = all(expected.get(f) == v for f, v in written.items()) and \
+                all(f in written for f in REQUIRED_FIELDS & set(expected))
         except ValueError:
             same = False
         if not same:

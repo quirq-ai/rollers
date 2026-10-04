@@ -605,3 +605,29 @@ def test_registry_cost_is_bounded(monkeypatch):
 def test_satisfies_refuses_leading_zeros(rng):
     with pytest.raises(ValueError):
         land_check.satisfies("1.2.3", rng)
+
+
+def test_an_aliased_entry_still_in_use_cannot_be_removed():
+    """Review of #14: importer `foo` installs is-number through an alias, written as its snapshot key."""
+    alias = "      foo:\n        specifier: npm:is-number@7.0.0\n        version: is-number@7.0.0\n      next:"
+    def add(lock, v):
+        return lock.replace("      next:", alias, 1).replace(
+            f"\n  next@{v}:\n", f"\n  is-number@7.0.0:\n    resolution: {{integrity: sha512-isnumber}}\n\n  next@{v}:\n", 1
+        ).replace(f"\n  next@{v}(", f"\n  is-number@7.0.0: {{}}\n\n  next@{v}(", 1)
+    base, head = add(LOCK_BASE, "16.3.7"), add(LOCK_HEAD, "16.3.8")
+    assert lock_check(head, base=base) == []
+    gone = LOCK_HEAD.replace("      next:", alias, 1)
+    assert any('removes the snapshot "is-number@7.0.0"' in p for p in lock_check(gone, base=base))
+
+
+@pytest.mark.parametrize("field", ["engines: {node: '>=20.9.0'}\n    ", "hasBin: true\n    "])
+def test_fields_that_decide_installing_cannot_be_left_out(field):
+    head = LOCK_HEAD.replace(field, "", 1)
+    assert head != LOCK_HEAD
+    assert any('"next@16.3.8" has fields' in p for p in lock_check(head))
+
+
+def test_deeply_nested_values_are_refused_not_crashed():
+    deep = "[" * 3000 + "x" + "]" * 3000
+    with pytest.raises(ValueError):
+        land_check._flow(deep)
