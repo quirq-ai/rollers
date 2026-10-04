@@ -101,6 +101,9 @@ on:
 permissions:
   contents: write
   pull-requests: write
+concurrency:  # a newer run cancels an older one; a cancelled run still turns auto-merge off
+  group: qq-roll-land-${{{{ github.event.pull_request.number }}}}
+  cancel-in-progress: true
 jobs:
   land:
     if: github.event.pull_request.user.login == 'dependabot[bot]' && github.repository == {repo_full}
@@ -126,6 +129,7 @@ jobs:
           if [ -n "$others" ]; then echo "commits not by Dependabot or unverified: $others"; clean=false; fi
           while IFS= read -r f; do
             [ -z "$f" ] && continue
+            if [[ "$f" == *'\\'* ]]; then printf 'escaped character in name: %s\\n' "$f"; clean=false; continue; fi
             ok=false
             for p in "${{allowed[@]}}"; do
               [[ "$f" == $p && "${{f//[^\/]/}}" == "${{p//[^\/]/}}" ]] && ok=true
@@ -139,7 +143,8 @@ jobs:
         env:
           GH_TOKEN: ${{{{ github.token }}}}
           PR_URL: ${{{{ github.event.pull_request.html_url }}}}
-        run: gh pr merge --auto --squash "$PR_URL"  # TODO(suraj): squash or merge commits (plan §10.3)
+          HEAD_SHA: ${{{{ github.event.pull_request.head.sha }}}}
+        run: gh pr merge --auto --squash --match-head-commit "$HEAD_SHA" "$PR_URL"  # TODO(suraj): squash or merge commits (plan §10.3)
       - name: leave anything else to a human
         if: always() && steps.land.outcome != 'success'
         env:
@@ -148,8 +153,7 @@ jobs:
         run: gh pr merge --disable-auto "$PR_URL" || true  # fails harmlessly when auto-merge is off
 """
 
-def land_workflow(rollers: list[dict], repo: str, commit: str, slug: str | None = None) -> str:
-    slug = slug or f"quirq-ai/{repo}"
+def land_workflow(rollers: list[dict], repo: str, commit: str, slug: str) -> str:
     patterns = " ".join("'" + json.dumps(p) + "'" for p in _patterns(rollers, repo))
     return LAND_WORKFLOW.format(header=HEADER.format(commit=commit), patterns=patterns,
                                 repo_full=f"'{slug}'", fetch_metadata=FETCH_METADATA)
@@ -169,8 +173,9 @@ def generate(rollers: list[dict], commit: str, *, backend: str = "github",
     for repo in repos:
         base = f"{backend}/{repo}/.github"
         files[f"{base}/dependabot.yml"] = dependabot_yml(rollers, repo, commit)
-        files[f"{base}/workflows/qq-roll-land.yml"] = land_workflow(rollers, repo, commit,
-                                                                    (slugs or {}).get(repo))
+        if repo not in (slugs or {}):
+            raise GenerateError(f"{repo}: not a github.com repo in infra-config repos.toml")
+        files[f"{base}/workflows/qq-roll-land.yml"] = land_workflow(rollers, repo, commit, slugs[repo])
     return files
 
 

@@ -9,6 +9,7 @@ from qqroll.cli import main
 from qqroll.config import ConfigError, load_rollers
 
 COMMIT = "0" * 40
+SLUGS = {"xo-space": "quirq-ai/xo-space", "innernet": "quirq-ai/innernet"}
 
 ROLLERS = [
     {"name": "python-deps", "repos": ["xo-space"], "moves": "Python requirements", "tool": "dependabot",
@@ -28,7 +29,7 @@ def test_dependabot_yml_follows_rollers_toml():
 
 
 def test_one_file_pair_per_dependabot_repo():
-    files = dependabot.generate(ROLLERS, COMMIT)
+    files = dependabot.generate(ROLLERS, COMMIT, slugs=SLUGS)
     assert sorted(files) == [
         "github/innernet/.github/dependabot.yml",
         "github/innernet/.github/workflows/qq-roll-land.yml",
@@ -40,7 +41,7 @@ def test_one_file_pair_per_dependabot_repo():
 
 
 def test_land_workflow_is_valid_and_scoped():
-    text = dependabot.land_workflow(ROLLERS, "xo-space", COMMIT)
+    text = dependabot.land_workflow(ROLLERS, "xo-space", COMMIT, "quirq-ai/xo-space")
     wf = yaml.safe_load(text)
     job = wf["jobs"]["land"]
     assert "dependabot[bot]" in job["if"] and "'quirq-ai/xo-space'" in job["if"]
@@ -49,7 +50,7 @@ def test_land_workflow_is_valid_and_scoped():
     run = job["steps"][1]["run"]
     assert """allowed=('"pyproject.toml"' '"requirements*.txt"')""" in run
     land = job["steps"][2]
-    assert "semver-major" in land["if"] and land["run"].startswith('gh pr merge --auto --squash "$PR_URL"')
+    assert "semver-major" in land["if"] and land["run"].startswith('gh pr merge --auto --squash --match-head-commit "$HEAD_SHA" "$PR_URL"')
     # Any failure before landing, or a skipped land, turns auto-merge off.
     assert job["steps"][3]["if"] == "always() && steps.land.outcome != 'success'"
     assert job["steps"][3]["run"].startswith('gh pr merge --disable-auto "$PR_URL"')
@@ -62,7 +63,7 @@ def test_land_workflow_uses_the_repos_slug():
 
 def _clean_check(tmp_path, repo):
     """The generated shell check, runnable against fake `gh api` output."""
-    text = dependabot.land_workflow(ROLLERS, repo, COMMIT)
+    text = dependabot.land_workflow(ROLLERS, repo, COMMIT, f"quirq-ai/{repo}")
     script = yaml.safe_load(text)["jobs"]["land"]["steps"][1]["run"]
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
@@ -99,6 +100,7 @@ def test_clean_check_globs_stay_in_their_directory(tmp_path):
     assert clean(["requirements.txt", "requirements-dev.txt"]) == "clean=true"
     assert clean(["requirements/x.txt"]) == "clean=false"
     assert clean(["requirementsfoo/.github/workflows/a.txt"]) == "clean=false"
+    assert clean(['requirements".txt']) == "clean=false"  # `*` must not match an escaped quote
 
 
 def test_clean_check_needs_only_dependabot_commits(tmp_path):
@@ -116,6 +118,11 @@ def test_nested_directory_prefixes_patterns():
     rollers = [dict(ROLLERS[1], directory="/web")]
     assert dependabot._patterns(rollers, "innernet") == [
         "web/package.json", "web/pnpm-lock.yaml", "web/pnpm-workspace.yaml"]
+
+
+def test_repo_without_a_slug_is_an_error():
+    with pytest.raises(dependabot.GenerateError, match="innernet: not a github.com repo"):
+        dependabot.generate(ROLLERS, COMMIT, slugs={"xo-space": "quirq-ai/xo-space"})
 
 
 def test_unknown_backend_is_an_error():
@@ -140,7 +147,7 @@ def test_repo_without_dependabot_roller_is_an_error():
 
 
 def test_check_reports_missing_stale_and_extra(tmp_path):
-    files = dependabot.generate(ROLLERS, COMMIT)
+    files = dependabot.generate(ROLLERS, COMMIT, slugs=SLUGS)
     assert len(dependabot.check(tmp_path, files)) == len(files)
     dependabot.write(tmp_path, files)
     assert dependabot.check(tmp_path, files) == []
@@ -161,6 +168,8 @@ def fake_infra_config(root: Path, rollers_toml: str) -> Path:
         "def load(root):\n"
         "    return {p.stem: tomllib.loads(p.read_text()) for p in (root / 'config').glob('*.toml')}\n")
     (root / "config" / "rollers.toml").write_text(rollers_toml)
+    (root / "config" / "repos.toml").write_text(
+        '[[repo]]\nname = "xo-space"\nsource = "github.com/quirq-ai/xo-space"\n')
     return root
 
 
