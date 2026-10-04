@@ -70,28 +70,34 @@ def test_land_workflow_uses_the_repos_slug():
 def test_generated_step_runs_the_check(tmp_path):
     """Run the generated step's shell with `gh` faked: a clean roll, then a forged one."""
     import json as _json
-    from tests_support import CLEAN_COMMIT, HEAD_RULES, RULES, npm_file
+    from tests_support import CLEAN_COMMIT, HEAD_RULES, LOCK_BASE, LOCK_HEAD, LOCK_PATCH, RULES, npm_file
     text = dependabot.land_workflow(ROLLERS, "innernet", COMMIT, "quirq-ai/innernet")
     step = yaml.safe_load(text)["jobs"]["land"]["steps"][1]
     bindir = tmp_path / "bin"
     bindir.mkdir()
 
-    def run(commits, head_rules=HEAD_RULES):
+    (tmp_path / "base.lock").write_text(LOCK_BASE)
+
+    def run(commits, head_rules=HEAD_RULES, head_lock=LOCK_HEAD):
         (tmp_path / "head_rules").write_text(_json.dumps([head_rules]))
-        (tmp_path / "files").write_text(_json.dumps([[npm_file()]]))
+        (tmp_path / "head.lock").write_text(head_lock)
+        (tmp_path / "files").write_text(_json.dumps([[npm_file(), npm_file("pnpm-lock.yaml", LOCK_PATCH)]]))
         (tmp_path / "commits").write_text(_json.dumps([commits]))
         (tmp_path / "rules").write_text(_json.dumps([RULES]))
         (bindir / "gh").write_text(
             "#!/bin/sh\n"
-            f'case "$*" in *files*) cat {tmp_path}/files;; *commits*) cat {tmp_path}/commits;; '
+            f'case "$*" in *pulls/1/files*) cat {tmp_path}/files;; *pulls/1/commits*) cat {tmp_path}/commits;; '
+            f'*compare/{"a" * 40}...{"c" * 40}*) echo {"b" * 40};; '
+            f'*contents/pnpm-lock.yaml?ref={"b" * 40}) cat {tmp_path}/base.lock;; '
+            f'*contents/pnpm-lock.yaml?ref={"c" * 40}) cat {tmp_path}/head.lock;; '
             f'*rules/branches/main) cat {tmp_path}/rules;; '
             f'*rules/branches/dependabot%2Fnpm_and_yarn%2Fnext-16.3.8) cat {tmp_path}/head_rules;; *) exit 1;; esac\n')
         (bindir / "gh").chmod(0o755)
         out = tmp_path / "out"
         out.write_text("")
         env = {"PATH": f"{bindir}:/usr/bin:/bin", "GITHUB_OUTPUT": str(out), "GITHUB_REPOSITORY": "quirq-ai/innernet",
-               "PR": "1", "BASE": "main", "HEAD_REF": "dependabot/npm_and_yarn/next-16.3.8", "SENDER": "dependabot[bot]", "TRIGGER": "dependabot[bot]", "CHANGED": "1",
-               "UPDATE_TYPE": "version-update:semver-patch", "PREV_VERSION": "16.3.7", "DEP_NAMES": "next",
+               "PR": "1", "BASE": "main", "BASE_SHA": "a" * 40, "HEAD_SHA": "c" * 40, "HEAD_REF": "dependabot/npm_and_yarn/next-16.3.8", "SENDER": "dependabot[bot]", "TRIGGER": "dependabot[bot]", "CHANGED": "2",
+               "UPDATE_TYPE": "version-update:semver-patch", "PREV_VERSION": "16.3.7", "NEW_VERSION": "16.3.8", "DEP_NAMES": "next",
                "QQ_ALLOWED": step["env"]["QQ_ALLOWED"]}
         subprocess.run(["bash", "-e", "-c", step["run"]], check=True, env=env)
         return out.read_text().strip()
@@ -99,6 +105,8 @@ def test_generated_step_runs_the_check(tmp_path):
     assert run([CLEAN_COMMIT]) == "clean=true"
     assert run([dict(CLEAN_COMMIT, committer={"login": "mallory"})]) == "clean=false"
     assert run([CLEAN_COMMIT], head_rules=[]) == "clean=false"
+    assert run([CLEAN_COMMIT], head_lock=LOCK_HEAD.replace("autoInstallPeers: true", "autoInstallPeers: false")) \
+        == "clean=false"
 
 
 def test_nested_directory_prefixes_patterns():
