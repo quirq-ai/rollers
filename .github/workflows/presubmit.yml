@@ -19,3 +19,13 @@ jobs:
           python-version: "3.14"
       - run: python -m pip install --quiet -e ".[test]"
       - run: python -m pytest -q -p no:cacheprovider
+      # infra-config is used by pinned commit (infra-config.commit), read through its own qqcfg.
+      - name: check out infra-config at the pinned commit
+        run: |
+          git init -q .qq/infra-config
+          git -C .qq/infra-config fetch -q --depth 1 https://github.com/quirq-ai/infra-config "$(cat infra-config.commit)"
+          git -C .qq/infra-config checkout -q FETCH_HEAD
+          python -m pip install --quiet -r .qq/infra-config/requirements.txt
+          python .qq/infra-config/tools/qqcfg.py validate
+      - name: "V0-ROL-02: generated Dependabot config matches rollers.toml"
+        run: qqroll dependabot --infra-config .qq/infra-config
