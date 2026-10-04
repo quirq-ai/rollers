@@ -135,6 +135,7 @@ jobs:
           CHANGED: ${{{{ github.event.pull_request.changed_files }}}}
           UPDATE_TYPE: ${{{{ steps.meta.outputs.update-type }}}}
           PREV_VERSION: ${{{{ steps.meta.outputs.previous-version }}}}
+          NEW_VERSION: ${{{{ steps.meta.outputs.new-version }}}}
           DEP_NAMES: ${{{{ steps.meta.outputs.dependency-names }}}}
           QQ_ALLOWED: '{allowed}'
           BASE_SHA: ${{{{ github.event.pull_request.base.sha }}}}

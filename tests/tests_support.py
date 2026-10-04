@@ -19,7 +19,7 @@ importers:
     dependencies:
       next:
         specifier: ^16.3.7
-        version: 16.3.7(react@19.3.0)
+        version: 16.3.7(@types/node@26.6.4)(react@19.3.0)
       react:
         specifier: ^19.3.0
         version: 19.3.0
@@ -38,7 +38,7 @@ packages:
 
 snapshots:
 
-  next@16.3.7(react@19.3.0):
+  next@16.3.7(@types/node@26.6.4)(react@19.3.0):
     dependencies:
       react: 19.3.0
 """

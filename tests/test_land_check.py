@@ -8,7 +8,8 @@ from tests_support import CLEAN_COMMIT, HEAD_RULES, LOCK_BASE, LOCK_HEAD, LOCK_P
 ALLOWED_NPM = [["package.json", "npm-manifest"], ["pnpm-lock.yaml", "npm-lock"]]
 ALLOWED_PIP = [["requirements*.txt", "pip-requirements"]]
 ENV = {"SENDER": "dependabot[bot]", "TRIGGER": "dependabot[bot]", "CHANGED": "2",
-       "UPDATE_TYPE": "version-update:semver-patch", "PREV_VERSION": "16.3.7", "DEP_NAMES": "next"}
+       "UPDATE_TYPE": "version-update:semver-patch", "PREV_VERSION": "16.3.7", "NEW_VERSION": "16.3.8",
+       "DEP_NAMES": "next"}
 FILES = [npm_file(), npm_file("pnpm-lock.yaml", LOCK_PATCH)]
 PIP_ENV = {"CHANGED": "1", "DEP_NAMES": "requests"}
 NPM_PATCH_TYPES = '@@ -1 +1 @@\n-      "@types/node": "^26.6.4",\n+      "@types/node": "^26.6.5",\n'
@@ -185,8 +186,12 @@ def test_risky_bumps_go_to_a_human(env, why):
 
 
 def test_a_minor_bump_past_1_0_is_clean():
-    assert check(env={"UPDATE_TYPE": "version-update:semver-minor", "PREV_VERSION": "16.2.4"}) == []
-    assert check(env={"UPDATE_TYPE": "version-update:semver-patch", "PREV_VERSION": "0.5.1"}) == []
+    def bump(prev, new, update):
+        env = {"UPDATE_TYPE": f"version-update:semver-{update}", "PREV_VERSION": prev, "NEW_VERSION": new}
+        base = LOCK_BASE.replace("16.3.7", prev).replace("^" + prev, "^" + prev)
+        return check(env=env, locks={"pnpm-lock.yaml": (base, base.replace(prev, new))})
+    assert bump("16.2.4", "16.3.0", "minor") == []
+    assert bump("0.5.1", "0.5.2", "patch") == []
 
 
 @pytest.mark.parametrize("line", [
@@ -214,15 +219,30 @@ def test_manifest_changes_only_the_bumped_dependency():
 
 # --- R-5: the lockfile moves only the bumped dependency -------------------------------------
 
-def lock_check(head, base=LOCK_BASE, deps="next"):
-    return check(env={"DEP_NAMES": deps}, locks={"pnpm-lock.yaml": (base, head)})
+def lock_check(head, base=LOCK_BASE, env=None):
+    return check(env=env, locks={"pnpm-lock.yaml": (base, head)})
+
+
+TYPES_ENV = {"DEP_NAMES": "@types/node", "PREV_VERSION": "26.6.4", "NEW_VERSION": "26.6.5"}
 
 
 def test_a_clean_lockfile_bump_is_clean():
     assert lock_check(LOCK_HEAD) == []
+    # A bump of a peer moves it inside other entries' peer suffixes too, as in innernet's lockfile.
     scoped = LOCK_BASE.replace("26.6.4", "26.6.5")
-    assert check(env={"DEP_NAMES": "@types/node"}, files=[npm_file(patch=NPM_PATCH_TYPES), FILES[1]],
+    assert "version: 16.3.7(@types/node@26.6.5)(react@19.3.0)" in scoped
+    assert check(env=TYPES_ENV, files=[npm_file(patch=NPM_PATCH_TYPES), FILES[1]],
                  locks={"pnpm-lock.yaml": (LOCK_BASE, scoped)}) == []
+
+
+def test_innernets_lockfile_shape_reads_and_bumps(tmp_path):
+    import pathlib
+    real = pathlib.Path(__file__).with_name("innernet-pnpm-lock.yaml").read_text()
+    assert land_check.lock_leaves(real)
+    bumped = real.replace("@types/node@26.6.4", "@types/node@26.6.5").replace(
+        "specifier: ^26.6.4\n        version: 26.6.4", "specifier: ^26.6.5\n        version: 26.6.5")
+    assert land_check.lock_problems("x", real, bumped, "@types/node", "26.6.4", "26.6.5") == []
+    assert land_check.lock_problems("x", real, bumped, "@types/node", "26.6.4", "26.6.6")
 
 
 @pytest.mark.parametrize("edit, where", [
@@ -233,25 +253,56 @@ def test_a_clean_lockfile_bump_is_clean():
     (("    devDependencies:\n", "    devDependencies:\n      evil:\n        specifier: 1.0.0\n        version: 1.0.0\n"),
      "importers/./devDependencies/evil"),                                                       # adds a package
     (("specifier: ^16.3.8", "specifier: 16.3.8"), "importers/./dependencies/next/specifier"),  # pin reshaped
-    (("version: 16.3.8(react@19.3.0)", "version: link:../next"), "importers/./dependencies/next/version"),
+    (("version: 16.3.8(@types/node@26.6.4)(react@19.3.0)", "version: link:../next"), "importers/./dependencies/next/version"),
     (("importers:\n", "overrides:\n  react: 18.0.0\n\nimporters:\n"), "overrides/react"),
+    (("version: 16.3.8(@types", "version: 15.0.0(@types"), "importers/./dependencies/next/version"),  # downgrade
+    (("version: 16.3.8(@types", "version: 17.0.0(@types"), "importers/./dependencies/next/version"),  # major
+    (("(react@19.3.0)\n      react:", "(evil@1.0.0)\n      react:"), "importers/./dependencies/next/version"),
+    (("version: 26.6.4", "version: 26.6.4(evil@1.0.0)"), "importers/./devDependencies/@types/node/version"),
 ])
 def test_lockfile_changes_beyond_the_bump_are_not_clean(edit, where):
     assert any(json.dumps(where) in p for p in lock_check(LOCK_HEAD.replace(*edit, 1)))
 
 
 def test_the_bumped_name_must_match():
-    assert any("importers/./dependencies/next/version" in p for p in lock_check(LOCK_HEAD, deps="react"))
+    env = {"DEP_NAMES": "react", "PREV_VERSION": "19.3.0", "NEW_VERSION": "19.3.1"}
+    assert any("importers/./dependencies/next/version" in p for p in lock_check(LOCK_HEAD, env=env))
 
 
-@pytest.mark.parametrize("text", ["importers:\n  .:\n    dependencies:\n      next 16\n",
-                                  "importers:\n  'next:\n", "a: 1\na: 2\n", "a:\n  b: \x0c1\n", "- top\n"])
+@pytest.mark.parametrize("text", [
+    "importers:\n  .:\n    dependencies:\n      next 16\n", "importers:\n  'next:\n", "a: 1\na: 2\n",
+    "a:\n  b: \x0c1\n", "- top\n",
+    "a:\n  b: 'x\n#'\n", "a:\n  b: {c: 1,\n  d: 2}\n", "a:\n  b: [x,\n  y]\n",        # values over lines
+    'a:\n  b: "x"\n', "a:\n  b: x\\y\n", "a:\n  b: |\n    x\n", "a: &x\n  b: 1\nc: *x\n", "a: !!str 1\n",
+    "a :\n  b: 1\n", "'a'b: 1\n", "a:\n  - 'x\n",
+])
 def test_an_unreadable_lockfile_is_not_clean(text):
     assert any("not a lockfile this check can read" in p for p in lock_check(text))
 
 
+def test_pnpms_own_forms_read():
+    leaves = land_check.lock_leaves("a:\n  'b''c': 'd''e'\n  f: {g: '>=1', h: [x, y]}\n  i:\n    - 'j'\n")
+    assert leaves[("a", "b'c")] == "'d''e'" and leaves[("a", "i", "-")] == "'j'\n"
+
+
+def test_a_lockfile_hiding_settings_in_a_multiline_value_is_not_clean():
+    """YAML would read everything from the open quote to the #" line as one value, dropping settings."""
+    hidden = LOCK_HEAD.replace("settings:", "packages:\n  evil@1.0.0:\n    resolution: \'x\n\nsettings:", 1)
+    hidden = hidden.replace("importers:", "#\'\nimporters:", 1)
+    assert any("not a lockfile this check can read" in p for p in lock_check(hidden))
+
+
+def test_an_escaped_tarball_is_not_clean():
+    line = '+    resolution: {integrity: sha512-x, "tarball": "https:\\/\\/evil.example\\/next.tgz"}'
+    files = [FILES[0], npm_file("pnpm-lock.yaml", f"@@ -1 +1 @@\n-  x\n{line}\n")]
+    assert any("non-registry resolution" in p for p in check(files=files))
+    head = LOCK_HEAD.replace("{integrity: sha512-new}", line[17:])
+    assert any("not a lockfile this check can read" in p for p in lock_check(head))
+
+
 def test_a_lockfile_not_read_is_not_clean():
     assert any("lockfile contents were not read" in p for p in check(locks={}))
+    assert any("exactly one dependency" in p for p in check(env={"DEP_NAMES": ""}))
 
 
 def test_lock_leaves_reads_innernets_shape():

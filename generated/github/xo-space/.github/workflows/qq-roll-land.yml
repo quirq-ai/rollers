@@ -18,7 +18,7 @@
 # TODO(expert): merges made with GITHUB_TOKEN do not trigger push workflows (post-submit); switch to
 # the quirq rollers App's token once it exists. Dependabot PRs only see Dependabot secrets.
 # TODO(expert): once owner review is required (V0-GAT-03), decide with gate how dependency-roll skips it.
-# qq-digest: sha256:948933587ffef8ef71e91ece3981e75605d8ddd561acd25d9ef511744b76806f
+# qq-digest: sha256:9135e1325d599aa1f67c909abcfbe941ca1447715e82569bf161aa89372c1917
 name: qq-roll-land
 on:
   pull_request:
@@ -49,6 +49,7 @@ jobs:
           CHANGED: ${{ github.event.pull_request.changed_files }}
           UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
           PREV_VERSION: ${{ steps.meta.outputs.previous-version }}
+          NEW_VERSION: ${{ steps.meta.outputs.new-version }}
           DEP_NAMES: ${{ steps.meta.outputs.dependency-names }}
           QQ_ALLOWED: '[["requirements*.txt","pip-requirements"]]'
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -71,7 +72,7 @@ jobs:
               QQ_ALLOWED    JSON list of [glob, kind]: the files a roll may modify and how their lines are checked
               BASE_SHA, HEAD_SHA  the PR's base and head commits; changed lockfiles are read whole at the merge base
                             and the head with `gh api` (GH_TOKEN, GITHUB_REPOSITORY)
-              SENDER, TRIGGER, CHANGED, UPDATE_TYPE, PREV_VERSION, DEP_NAMES, GITHUB_OUTPUT
+              SENDER, TRIGGER, CHANGED, UPDATE_TYPE, PREV_VERSION, NEW_VERSION, DEP_NAMES, GITHUB_OUTPUT
 
           A PR is clean only when every rule holds; anything else goes to a human. It fails closed: missing
           or unexpected data is "not clean", never "clean".
@@ -109,7 +110,7 @@ jobs:
           _PLACED_VERSION = re.compile(r'(?<=[=<>~!^"])\s*' + _VERSION)
           _BARE_VERSION = re.compile(_VERSION)
           # Added lockfile lines may not point anywhere but the registry.
-          LOCK_FORBIDDEN = re.compile(r"tarball:|://|git\+|git@|\bfile:|\blink:|\bgithub:|\brepo:|\bdirectory:|"
+          LOCK_FORBIDDEN = re.compile(r"tarball|://|git\+|git@|\bfile:|\blink:|\bgithub:|\brepo:|\bdirectory:|"
                                       r"\btype:\s*(git|directory)\b")
 
 
@@ -158,18 +159,47 @@ jobs:
 
           # pnpm-lock.yaml: the importers section says which version of each direct dependency is installed, and
           # settings (and any other top-level section) how. A roll of one dependency may change only that
-          # dependency's specifier and version there. packages and snapshots hold the resolved tree, which a bump
-          # legitimately reshapes; their added lines are only checked against LOCK_FORBIDDEN.
+          # dependency's specifier and version there, plus the same version where it appears in other entries'
+          # peer suffixes. packages and snapshots hold the resolved tree, which a bump legitimately reshapes.
           # TODO(expert): check snapshots against registry metadata, so a roll cannot add a dependency edge to an
           # unrelated package's snapshot.
           LOCK_TREE = {"packages", "snapshots"}
           LOCK_DEP_TYPES = {"dependencies", "devDependencies", "optionalDependencies"}
-          _LOCK_VERSION = re.compile(r"[0-9][0-9A-Za-z.+-]*(\(.*\))?")
+          # pnpm writes plain or single-quoted scalars on one line. Everything else YAML allows (double quotes and
+          # their escapes, block scalars, anchors, aliases, tags, values continued on the next line) could make
+          # YAML read the file differently from this parser, so it is refused.
+          _LOCK_REFUSED = re.compile(r'["\\`]')
+          _LOCK_VALUE_START = re.compile(r"[|>&*!%@`]")
+
+
+          def _closed(text, n):
+              """`text` with its single quotes ('' escapes one) and flow brackets closed on this line."""
+              quoted, depth, i = False, 0, 0
+              while i < len(text):
+                  c = text[i]
+                  if quoted:
+                      if c == "'":
+                          if text[i + 1:i + 2] == "'":
+                              i += 1
+                          else:
+                              quoted = False
+                  elif c == "'":
+                      quoted = True
+                  elif c in "{[":
+                      depth += 1
+                  elif c in "}]":
+                      depth -= 1
+                      if depth < 0:
+                          raise ValueError(f"line {n}: unbalanced brackets")
+                  i += 1
+              if quoted or depth:
+                  raise ValueError(f"line {n}: a quote or bracket left open (multi-line values are refused)")
+              return text
 
 
           def lock_leaves(text):
-              """pnpm-lock.yaml as {key path: scalar}, for its subset of YAML: block mappings and block lists of
-              scalars (a list is one leaf under the key "-"); flow values stay text.
+              """pnpm-lock.yaml as {key path: scalar}, for the subset of YAML pnpm writes: block mappings and block
+              lists of one-line scalars (a list is one leaf under the key "-"); flow values stay text.
 
               Anything outside that subset raises ValueError, so an odd lockfile fails closed.
               """
@@ -179,58 +209,85 @@ jobs:
                   body = line.strip(" ")
                   if not body or body.startswith("#"):
                       continue
-                  if CONTROL.search(line) or "\t" in line:
-                      raise ValueError(f"line {n}: control character")
+                  if CONTROL.search(line) or "\t" in line or _LOCK_REFUSED.search(line):
+                      raise ValueError(f"line {n}: a control character, double quote, backslash or backtick")
                   indent = len(line) - len(line.lstrip(" "))
                   if body == "-" or body.startswith("- "):  # a block list item: kept, in order, as the list's text
+                      item = _closed(body[1:].strip(), n)
+                      if _LOCK_VALUE_START.match(item):
+                          raise ValueError(f"line {n}: a YAML indicator pnpm does not write")
                       while stack and stack[-1][0] >= indent:
                           stack.pop()
                       if not stack:
                           raise ValueError(f"line {n}: list item outside a mapping")
                       path = tuple(k for _, k in stack) + ("-",)
-                      leaves[path] = (leaves.get(path) or "") + body[1:].strip() + "\n"
+                      leaves[path] = (leaves.get(path) or "") + item + "\n"
                       continue
-                  if body.startswith(("'", '"')):
-                      end = body.find(body[0], 1)
-                      if end < 0 or body[end + 1:end + 2] != ":":
-                          raise ValueError(f"line {n}: unterminated quoted key")
-                      key, rest = body[1:end], body[end + 2:]
+                  if body.startswith("'"):
+                      m = re.match(r"'((?:[^']|'')*)':( |$)", body)
+                      if not m:
+                          raise ValueError(f"line {n}: not a quoted key")
+                      key, rest = m[1].replace("''", "'"), body[m.end():]
                   elif ": " in body or body.endswith(":"):
                       key, _, rest = body.partition(":")
+                      if not re.fullmatch(r"[^'#{}\[\],&*!|>%@?][^#{}\[\],]*", key) or key != key.strip():
+                          raise ValueError(f"line {n}: not a plain key")
+                      rest = rest[1:] if rest.startswith(" ") else rest
                   else:
                       raise ValueError(f"line {n}: not a mapping entry")
-                  if rest and not rest.startswith(" "):
-                      raise ValueError(f"line {n}: not a mapping entry")
+                  rest = _closed(rest.strip(), n)
+                  if _LOCK_VALUE_START.match(rest):
+                      raise ValueError(f"line {n}: a YAML indicator pnpm does not write")
                   while stack and stack[-1][0] >= indent:
                       stack.pop()
                   path = tuple(k for _, k in stack) + (key,)
                   if path in leaves:
                       raise ValueError(f"line {n}: duplicate key {'/'.join(path)}")
-                  leaves[path] = rest.strip() or None
-                  if not rest.strip():
+                  leaves[path] = rest or None
+                  if not rest:
                       stack.append((indent, key))
               return leaves
 
 
-          def lock_problems(shown, base, head, deps):
-              """What a roll of `deps` changes in pnpm-lock.yaml beyond the bumped dependency's importer entries."""
+          def _split_version(value):
+              """An importer version, `16.3.8(react@19.3.0)`, as ("16.3.8", "(react@19.3.0)"), or None."""
+              m = re.fullmatch(r"(" + _VERSION + r")(\(.*\))?", value or "")
+              return (m[1], m[2] or "") if m else None
+
+
+          def lock_problems(shown, base, head, dep, prev, new_version):
+              """What a roll of `dep` from `prev` to `new_version` changes in pnpm-lock.yaml beyond that
+              dependency's importer entries and its version in other entries' peer suffixes."""
               try:
                   old, new = lock_leaves(base), lock_leaves(head)
               except ValueError as e:
                   return [f"{shown}: not a lockfile this check can read ({e})"]
+              # The bumped dependency's own version inside a peer suffix, e.g. (react@19.3.0), may move.
+              peer = re.compile(r"(?<=\()" + re.escape(dep) + "@" + _VERSION)
+
+              def unpeered(suffix):
+                  return peer.sub(dep + "@V", suffix)
               out = []
               for path in sorted(set(old) | set(new)):
-                  if old.get(path, ()) == new.get(path, ()) or path[0] in LOCK_TREE:
+                  before, after = old.get(path), new.get(path)
+                  if (path in old and path in new and before == after) or path[0] in LOCK_TREE:
                       continue
-                  bumped = (len(path) == 5 and path[0] == "importers" and path[2] in LOCK_DEP_TYPES
-                            and path[3] in deps and path[4] in ("specifier", "version")
-                            and old.get(path) and new.get(path))
-                  if bumped and path[4] == "specifier" and _BARE_VERSION.sub("V", old[path]) == _BARE_VERSION.sub("V", new[path]):
-                      continue
-                  if bumped and path[4] == "version" and _LOCK_VERSION.fullmatch(new[path]):
-                      continue
+                  entry_field = (len(path) == 5 and path[0] == "importers" and path[2] in LOCK_DEP_TYPES
+                                 and path in old and path in new and path[4] in ("specifier", "version"))
+                  if entry_field and path[3] == dep:
+                      if path[4] == "specifier" and before and after and \
+                              _BARE_VERSION.sub("V", before) == _BARE_VERSION.sub("V", after):
+                          continue
+                      was, now = _split_version(before), _split_version(after)
+                      if path[4] == "version" and was and now and was[0] == prev and now[0] == new_version \
+                              and unpeered(was[1]) == unpeered(now[1]):
+                          continue
+                  elif entry_field and path[4] == "version":
+                      was, now = _split_version(before), _split_version(after)
+                      if was and now and was[0] == now[0] and unpeered(was[1]) == unpeered(now[1]):
+                          continue
                   out.append(f"{shown}: changes {json.dumps('/'.join(path))[:100]}, which a roll of "
-                             f"{json.dumps(sorted(deps))} may not")
+                             f"{json.dumps(dep)} from {json.dumps(prev)} to {json.dumps(new_version)} may not")
               return out[:10]
 
 
@@ -298,8 +355,11 @@ jobs:
                   if kinds[0] == "npm-lock":
                       if filename not in locks:
                           out.append(f"{shown}: lockfile contents were not read")
+                      elif len(dep_names) != 1:
+                          out.append(f"{shown}: a lockfile is checked only for a roll of exactly one dependency")
                       else:
-                          out += lock_problems(shown, *locks[filename], deps["npm-manifest"])
+                          out += lock_problems(shown, *locks[filename], dep_names[0], env.get("PREV_VERSION", "").strip(),
+                                               env.get("NEW_VERSION", "").strip())
                   others = sorted({n for n, _ in keys["+"] + keys["-"]} - deps.get(kinds[0], set()))
                   if others:
                       out.append(f"{shown}: changes {json.dumps(others)[:100]}, not the bumped dependency")

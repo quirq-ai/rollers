@@ -97,7 +97,7 @@ def test_generated_step_runs_the_check(tmp_path):
         out.write_text("")
         env = {"PATH": f"{bindir}:/usr/bin:/bin", "GITHUB_OUTPUT": str(out), "GITHUB_REPOSITORY": "quirq-ai/innernet",
                "PR": "1", "BASE": "main", "BASE_SHA": "a" * 40, "HEAD_SHA": "c" * 40, "HEAD_REF": "dependabot/npm_and_yarn/next-16.3.8", "SENDER": "dependabot[bot]", "TRIGGER": "dependabot[bot]", "CHANGED": "2",
-               "UPDATE_TYPE": "version-update:semver-patch", "PREV_VERSION": "16.3.7", "DEP_NAMES": "next",
+               "UPDATE_TYPE": "version-update:semver-patch", "PREV_VERSION": "16.3.7", "NEW_VERSION": "16.3.8", "DEP_NAMES": "next",
                "QQ_ALLOWED": step["env"]["QQ_ALLOWED"]}
         subprocess.run(["bash", "-e", "-c", step["run"]], check=True, env=env)
         return out.read_text().strip()
