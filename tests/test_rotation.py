@@ -194,7 +194,7 @@ def test_dry_run_writes_nothing_and_shows_the_diff():
 def test_invalid_manifest_is_a_warning_not_a_crash():
     fake = FakeGitHub({"xo-space": 'schema = "quirq-repo/1"\n'})
     report = run(fake)
-    assert report.prs == [] and "manifest is invalid" in report.warnings[0]
+    assert report.prs == [] and "manifest is invalid" in report.warnings[0] and report.failed
 
 
 def test_http_errors_are_actionable():
@@ -268,7 +268,7 @@ def test_verify_promotion_runs_the_promotion_gate_checks():
     reason, calls = _verify(GOOD)
     assert reason is None
     ref = "ghcr.io/quirq-ai/toolchains/python@" + digest(GOOD)
-    assert calls[0] == ["oras", "manifest", "fetch", ref]
+    assert calls[0] == ["oras", "manifest", "fetch", "--", ref]
     assert calls[1] == ["gh", "attestation", "verify", "oci://" + ref, "--repo", "quirq-ai/toolchains",
                         "--signer-workflow", "quirq-ai/toolchains/.github/workflows/build.yml",
                         "--source-ref", "refs/heads/main",

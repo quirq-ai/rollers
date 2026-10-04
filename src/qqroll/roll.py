@@ -34,6 +34,7 @@ class Roll:
     new_text: str
     changes: list[Change] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)   # why a pin was left alone; a person can act on it
+    notes: list[str] = field(default_factory=list)     # worth knowing, but every pin was rolled
 
     @property
     def changed(self) -> bool:
@@ -56,12 +57,12 @@ def _image(source) -> tuple[str, str] | None:
         return None
 
 
-def _older(version: str, than: str) -> bool:
-    """True when dotted numeric `version` sorts before `than`; False when either is not numeric."""
+def _numeric(version) -> tuple[int, ...] | None:
+    """A dotted numeric version as a tuple, or None when it is missing or not numeric."""
     try:
-        return tuple(map(int, version.split("."))) < tuple(map(int, than.split(".")))
+        return tuple(map(int, version.split("."))) if isinstance(version, str) and version else None
     except ValueError:
-        return False
+        return None
 
 
 def plan(text: str, promoted: list[Promoted], *, source: str = "infra/repo.toml",
@@ -101,7 +102,15 @@ def plan(text: str, promoted: list[Promoted], *, source: str = "infra/repo.toml"
             if current.get("source") == new.source and current["digest"] == new.digest:
                 version_at[platform] = new.version
                 continue
-            if _older(new.version, str(pin.get("version", ""))):
+            # The pin's version label is the only record of what it is at, so without a numeric one a
+            # downgrade cannot be ruled out. (A revert to an earlier revision of the same version is a
+            # reviewed promotion on toolchains main, and rolls.)
+            have, want = _numeric(pin.get("version")), _numeric(new.version)
+            if have is None or want is None:
+                roll.skipped.append(f"{name} ({platform}): version label {pin.get('version')!r} or promoted "
+                                    f"{new.version!r} is not a numeric version; cannot rule out a downgrade")
+                continue
+            if want < have:
                 roll.skipped.append(f"{name} ({platform}): promoted {new.version} is older than the pinned "
                                     f"{pin.get('version')}; the roller does not downgrade")
                 continue
@@ -117,8 +126,8 @@ def plan(text: str, promoted: list[Promoted], *, source: str = "infra/repo.toml"
         versions = set(version_at.values())
         version = versions.pop() if len(versions) == 1 and None not in versions else None
         if version is None:
-            roll.skipped.append(f"{name}: version label left at {pin.get('version')!r}; its platforms are "
-                                "not all at one promoted version")
+            roll.notes.append(f"{name}: version label left at {pin.get('version')!r}; its platforms are "
+                              "not all at one promoted version")
         for platform, current, new in rolls:
             manifest.set_pin("toolchains", name, source=new.source, digest=new.digest, version=version,
                              platform=platform)

@@ -111,7 +111,7 @@ class Backend:
         2. its build provenance verifies against toolchains' build.yml on main, at `built_from`.
         """
         ref = f"{p.registry}/{p.repository}@{p.manifest}"
-        code, raw, err = self._run(["oras", "manifest", "fetch", ref])
+        code, raw, err = self._run(["oras", "manifest", "fetch", "--", ref])
         if code != 0:
             return f"cannot fetch the manifest of {ref}: {err or f'exit {code}'}"
         if "sha256:" + hashlib.sha256(raw).hexdigest() != p.manifest:

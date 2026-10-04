@@ -46,7 +46,8 @@ rolls only move `requirements*.txt` floors, and may open no PR at all (`TODO(exp
 
 `quirq-ai/toolchains` records each promoted toolchain by digest in `promoted.toml` (V0-TCH-03). The
 roller reads it from a checkout of toolchains `main`, only through toolchains' own parser
-(`tools/qqtc.py`, `load_promoted`), and moves every repo's `[toolchains.*]` pins in `infra/repo.toml`
+(`qqtc promoted-changed`, run as its own isolated process with no credentials; in CI, in a separate
+job from the one holding the bot token, whose JSON output is re-validated here), and moves every repo's `[toolchains.*]` pins in `infra/repo.toml`
 to those digests in sync's `oci://` form: `source` names the image manifest by digest and `digest` is
 its one toolchain layer. The manifest is edited only through `qqsync`, so a roll changes just the pin
 and its `version` label and leaves every other byte alone.
@@ -54,18 +55,19 @@ and its `version` label and leaves every other byte alone.
 - Only per-platform toolchain pins a manifest already has, from the image the promotion names
   (registry and repository), are moved; a roller never adds a toolchain. A pin for every platform is
   left alone, because each promoted image is for one platform. The toolchain's `version` label moves
-  only when every platform ends up at that version. A promotion older than the label is not rolled.
+  only when every platform ends up at that version. A promotion older than the label is not rolled,
+  and a pin without a numeric version label is not rolled either, since a downgrade can't be ruled out.
 - A roll stays inside the org-wide pin in infra-config `kinds.toml` (python `3.14`, node `24`). A new
   minor or major means moving that pin first, which is a policy change for suraj.
 - Any pin left alone is reported and makes the command exit 1: a skipped pin needs a person and is
   never reported as current.
-- Before `qqroll rotation` writes a roll, it checks each new pin again, failing closed, with the same
+- Before `qqroll rotation` or `qqroll roll` writes a roll, it checks each new pin again, failing closed, with the same
   checks as toolchains' promotion gate: the manifest fetched with `oras` hashes to the pinned digest
   and is exactly one toolchain layer, the pinned one; and `gh attestation verify` finds build
   provenance from toolchains' `.github/workflows/build.yml` on `main`, at the pin's `built_from`. A
   repo with a pin that fails either check is not rolled.
 - `qqroll roll` edits one local manifest; it is the core that v1's `qq roll` reuses, so both make the
-  same diffs. It does not run the registry checks.
+  same diffs. `--unverified` skips the registry checks, for offline tests only.
 - `qqroll rotation` reads `rollers.toml` (the `quirq-rollers` roller named `toolchains`), fetches each
   listed repo's manifest from its default branch, and opens or refreshes one PR on the branch
   `qq-roll/toolchains`. Repos with no manifest yet are skipped. GitHub calls sit behind
@@ -73,7 +75,7 @@ and its `version` label and leaves every other byte alone.
 
 ```sh
 qqroll roll --toolchains ../toolchains --manifest infra/repo.toml --infra-config ../infra-config
-qqroll rotation --infra-config ../infra-config --toolchains ../toolchains                 # dry run: diffs only
+qqroll rotation --infra-config ../infra-config --toolchains ../toolchains   # dry run: checks and diffs, opens nothing
 QQ_ROLLER_TOKEN=... qqroll rotation --infra-config ../infra-config --toolchains ../toolchains --apply
 ```
 

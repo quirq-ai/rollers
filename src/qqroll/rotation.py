@@ -44,13 +44,12 @@ def body(changes: list[roll.Change], promoted_from: str, rollers_commit: str, au
         c.toolchain, c.platform, f"`{c.old_digest}`", f"`{c.new.manifest}` / `{c.new.digest}`",
         f"{c.new.version}-r{c.new.revision}", c.new.build_run)) + " |" for c in changes)
     return (f"Moves toolchain pins in `{path}` to the digests quirq-ai/toolchains promoted "
-            f"(`promoted.toml` at {promoted_from}).\n\n"
+            f"(`promoted.toml` read with its qqtc at {promoted_from}).\n\n"
             "| Toolchain | Platform | From (layer) | To (manifest / layer) | Version | Build |\n"
             "|---|---|---|---|---|---|\n"
             f"{rows}\n\n"
-            "Each new pin was checked before this PR was written: it is in promoted.toml on toolchains "
-            "main, its manifest is exactly the one pinned layer, and its build provenance verifies "
-            "against toolchains' build.yml on main.\n\n"
+            "Each new pin was checked before this PR was written: its manifest is exactly the one pinned "
+            "layer, and its build provenance verifies against toolchains' build.yml on main.\n\n"
             f"Change class: `dependency-roll` (infra-config gate.toml). {landing}\n\n"
             f"Written through qqsync by quirq-ai/rollers at {rollers_commit} (V0-ROL-01).\n")
 
@@ -88,9 +87,10 @@ def _roll_repo(backend, repo, path, promoted, report, verified, *, kinds_pins, p
     try:
         r = roll.plan(text, promoted, source=f"{repo}:{path}", kinds_pins=kinds_pins)
     except roll.ManifestError as e:
+        report.failed = True
         report.warnings.append(f"{repo}: manifest is invalid, not rolled:\n{e}")
         return
-    report.warnings.extend(f"{repo}: {s}" for s in r.skipped)
+    report.warnings.extend(f"{repo}: {s}" for s in r.skipped + r.notes)
     if r.skipped:
         report.failed = True  # a skipped pin needs a person; never report it as current
     if not r.changed:

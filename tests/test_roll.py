@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -5,14 +6,14 @@ import pytest
 
 from qqroll import promoted, roll
 from qqroll.cli import main
-from promoted_support import PROMOTED, TOOLCHAINS, entry, needs_toolchains
+from promoted_support import ENTRIES, PROMOTED, TOOLCHAINS, entry, needs_toolchains
 
 FIX = Path(__file__).parent / "fixtures"
 STALE = (FIX / "stale.repo.toml").read_text()
 ROLLED = (FIX / "rolled.repo.toml").read_text()
 NEW_PY = "sha256:230c6677ccbaba9043c810b9c4a6096ed354c8a981bb62ea90bd059b12d1b03c"   # the layer
 NEW_PY_IMAGE = "oci://ghcr.io/quirq-ai/toolchains/python@sha256:32c0b762db5ec5453e63cf057ab4fa072751a19f1af70f08c07ac4f5fb70a716"
-SYNC = Path(os.environ.get("QQ_SYNC", "/nonexistent")) / "tests" / "fixtures" / "xo-space.repo.toml"
+SYNC = Path(os.environ.get("QQ_SYNC", "")) / "tests" / "fixtures" / "xo-space.repo.toml"
 
 
 def test_from_entry_is_sync_pin_form():
@@ -93,11 +94,45 @@ def test_roll_moves_a_layer_only_change():
     assert roll.plan(text, PROMOTED).new_text == ROLLED
 
 
-@pytest.mark.skipif(not SYNC.is_file(), reason="set QQ_SYNC to a quirq-ai/sync checkout")
-def test_sync_fixture_is_current():
-    # sync's own xo-space fixture already pins the promoted python; the roller agrees it is current.
-    r = roll.plan(SYNC.read_text(), PROMOTED)
-    assert not r.changed and r.skipped == []
+needs_sync = pytest.mark.skipif(not os.environ.get("QQ_SYNC"), reason="set QQ_SYNC to a quirq-ai/sync checkout")
+
+
+@needs_sync
+def test_sync_fixture_rolls_from_stale():
+    # sync's own xo-space fixture pins the promoted python. Made one promotion stale, it rolls back to
+    # exactly sync's bytes, and then it is current.
+    fixture = SYNC.read_text()
+    stale = (fixture.replace(PROMOTED[1].source, "oci://ghcr.io/quirq-ai/toolchains/python@sha256:" + "1" * 64)
+             .replace(NEW_PY, "sha256:" + "2" * 64).replace('version = "3.14.8"', 'version = "3.14.7"'))
+    assert stale != fixture
+    r = roll.plan(stale, PROMOTED)
+    assert r.new_text == fixture and r.skipped == []
+    current = roll.plan(fixture, PROMOTED)
+    assert not current.changed and current.skipped == []
+
+
+def test_roll_needs_a_numeric_version_label():
+    for label in ('version = "latest"', ''):
+        text = STALE.replace('version = "3.14.7"   # rollers keep this current', label)
+        r = roll.plan(text, PROMOTED)
+        assert not r.changed and "cannot rule out a downgrade" in r.skipped[0]
+
+
+def test_parse_json():
+    got = promoted.parse_json(json.dumps(ENTRIES))
+    assert got == PROMOTED
+
+
+@pytest.mark.parametrize("text, match", [
+    ("[[[", "not JSON"), ('{"name": "x"}', "not a list"), ("[1]", "not a list"),
+    ('[{"name": "x"}]', "version"),
+    (json.dumps([dict(ENTRIES[1], revision=True)]), "revision"),
+    (json.dumps([dict(ENTRIES[1], version=None)]), "malformed|version"),
+    (json.dumps([ENTRIES[1], ENTRIES[1]]), "promoted twice"),
+])
+def test_parse_json_rejects(text, match):
+    with pytest.raises(promoted.PromotedError, match=match):
+        promoted.parse_json(text)
 
 
 def test_roll_stays_inside_the_kinds_pin():
@@ -131,7 +166,7 @@ def test_version_label_stays_when_platforms_would_disagree():
     r = roll.plan(TWO_PLATFORMS, PROMOTED)  # only linux-x86_64 is promoted
     assert [c.platform for c in r.changes] == ["linux-x86_64"]
     assert 'version = "3.14.7"' in r.new_text and NEW_PY in r.new_text
-    assert "version label left at '3.14.7'" in r.skipped[0]
+    assert "version label left at '3.14.7'" in r.notes[0] and r.skipped == []
 
 
 def test_version_label_moves_when_every_platform_reaches_it():
@@ -156,7 +191,7 @@ def test_roll_refuses_an_invalid_manifest():
 def test_cli_roll_edits_in_place(tmp_path, capsys):
     m = tmp_path / "repo.toml"
     m.write_bytes(STALE.encode())
-    args = ["roll", "--toolchains", TOOLCHAINS, "--manifest", str(m)]
+    args = ["roll", "--toolchains", TOOLCHAINS, "--manifest", str(m), "--unverified"]
     assert main(args + ["--dry-run"]) == 0
     assert m.read_text() == STALE
     assert main(args) == 0
@@ -171,3 +206,16 @@ def test_cli_roll_fails_on_a_skipped_pin(tmp_path, capsys):
     m.write_bytes(STALE.replace("toolchains/python@", "someone/python@").encode())
     assert main(["roll", "--toolchains", TOOLCHAINS, "--manifest", str(m)]) == 1
     assert "not rolled (1 skipped)" in capsys.readouterr().out
+
+
+def test_cli_roll_verifies_before_writing(tmp_path, capsys, monkeypatch):
+    from qqroll.backends import github
+    monkeypatch.setattr(github.Backend, "verify_promotion", lambda self, p: "no build provenance")
+    m, j = tmp_path / "repo.toml", tmp_path / "promoted.json"
+    m.write_bytes(STALE.encode())
+    j.write_text(json.dumps(ENTRIES))
+    assert main(["roll", "--promoted-json", str(j), "--manifest", str(m)]) == 1
+    assert m.read_text() == STALE and "did not verify: python 3.14.8-r1" in capsys.readouterr().err
+    monkeypatch.setattr(github.Backend, "verify_promotion", lambda self, p: None)
+    assert main(["roll", "--promoted-json", str(j), "--manifest", str(m)]) == 0
+    assert m.read_text() == ROLLED

@@ -50,6 +50,6 @@ jobs:
         run: |
           d=$(mktemp -d)
           cp tests/fixtures/stale.repo.toml "$d/repo.toml"
-          qqroll roll --toolchains .qq/toolchains --manifest "$d/repo.toml" --infra-config .qq/infra-config
+          qqroll roll --toolchains .qq/toolchains --manifest "$d/repo.toml" --infra-config .qq/infra-config --unverified
           cmp "$d/repo.toml" tests/fixtures/rolled.repo.toml
           qqroll roll --toolchains .qq/toolchains --manifest "$d/repo.toml" | grep -q 'toolchain pins are current'

@@ -24,6 +24,16 @@ def _warning(text: str, *, actions: bool) -> str:
     return "::warning::" + text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
 
+def _promoted(args):
+    """Promotions from --promoted-json (qqtc's output, made elsewhere) or by running qqtc in --toolchains."""
+    from qqroll import promoted
+
+    if args.promoted_json:
+        with open(args.promoted_json, encoding="utf-8") as f:
+            return promoted.parse_json(f.read(), args.promoted_json)
+    return promoted.load(args.toolchains)
+
+
 def cmd_dependabot(args) -> int:
     from qqroll import dependabot
     from qqroll.config import ConfigError, load, rollers
@@ -57,7 +67,7 @@ def cmd_roll(args) -> int:
 
     try:
         kinds_pins = toolchain_pins(load(args.infra_config)) if args.infra_config else None
-        new = promoted.load(args.toolchains)
+        new = _promoted(args)
         with open(args.manifest, encoding="utf-8", newline="") as f:
             text = f.read()
         r = roll.plan(text, new, source=args.manifest, kinds_pins=kinds_pins)
@@ -66,6 +76,18 @@ def cmd_roll(args) -> int:
         return 1
     for s in r.skipped:
         print(f"skipped {s}", file=sys.stderr)
+    for n in r.notes:
+        print(f"note: {n}", file=sys.stderr)
+    if r.changed and args.unverified:
+        print("warning: --unverified: the new pins' manifests and build provenance were NOT checked",
+              file=sys.stderr)
+    elif r.changed:
+        from qqroll.backends.github import Backend
+        bad = sorted({f"{c.new.label}: {why}" for c in r.changes if (why := Backend().verify_promotion(c.new))})
+        if bad:
+            for b in bad:
+                print(f"qqroll: not rolled, a promotion did not verify: {b}", file=sys.stderr)
+            return 1
     for c in r.changes:
         print(f"rolled {c}")
     if not r.changed:
@@ -92,7 +114,7 @@ def cmd_rotation(args) -> int:
         return 1
     try:
         cfg = load(args.infra_config)
-        new = promoted.load(args.toolchains)
+        new = _promoted(args)
         name = args.backend or cfg.get("org", {}).get("org", {}).get("default_backend", "github")
         backend = backends.load(name, token=token if args.apply else read_token, slugs=dependabot.github_slugs(cfg))
         report = rotation.run(backend, rollers(cfg), new, kinds_pins=toolchain_pins(cfg),
@@ -124,17 +146,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_dependabot)
 
     p = sub.add_parser("roll", help="roll one manifest's toolchain pins to promoted digests (V0-ROL-01)")
-    p.add_argument("--toolchains", required=True,
-                   help="a quirq-ai/toolchains checkout of main; promoted.toml is read with its own qqtc parser")
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--toolchains", help="a quirq-ai/toolchains checkout of main; its qqtc reads promoted.toml")
+    src.add_argument("--promoted-json", help="the output of `qqtc promoted-changed` (no base), made elsewhere")
     p.add_argument("--manifest", default="infra/repo.toml", help="manifest to edit in place")
     p.add_argument("--infra-config", help="infra-config checkout; keeps rolls inside its kinds.toml pins")
     p.add_argument("--dry-run", action="store_true", help="report the roll without writing")
+    p.add_argument("--unverified", action="store_true",
+                   help="skip the registry checks (manifest shape, build provenance); for offline tests only")
     p.set_defaults(func=cmd_roll)
 
     p = sub.add_parser("rotation", help="roll every repo rollers.toml lists and open roll PRs (V0-ROL-01)")
     p.add_argument("--infra-config", required=True, help="path to a quirq-ai/infra-config checkout")
-    p.add_argument("--toolchains", required=True,
-                   help="a quirq-ai/toolchains checkout of main; promoted.toml is read with its own qqtc parser")
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--toolchains", help="a quirq-ai/toolchains checkout of main; its qqtc reads promoted.toml")
+    src.add_argument("--promoted-json", help="the output of `qqtc promoted-changed` (no base), made elsewhere")
     p.add_argument("--promoted-from", default="an unrecorded commit",
                    help="where the toolchains checkout came from, for the PR body (e.g. quirq-ai/toolchains@<sha>)")
     p.add_argument("--rollers-commit", default="an unrecorded commit", help="this repo's commit, for the PR body")
