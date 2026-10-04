@@ -696,3 +696,19 @@ def test_satisfies_refuses_ranges_npm_finds_invalid(rng):
 def test_flow_keys_must_be_scalars(text):
     with pytest.raises(ValueError):
         land_check._flow(text)
+
+
+@pytest.mark.parametrize("version, rng", [
+    # audit of a6e6ed9 (B-R6-1): inputs where exact arithmetic and npm's JavaScript disagree
+    ("1.5.0", ">=1.0.0 <9007199254740992"), ("1.5.0", ">=1.0.0 <0.9007199254740991.x"),   # past 2^53 - 1
+    ("1.5.0", ">=1.0.0\x1f<2.0.0"), ("1.5.0", ">=1.0.0\x85<2.0.0"), ("1.5.0", ">=1.0.0\xa0<2.0.0"),
+    ("1.0.0-" + "a." * 130 + "1", "*"), ("1.5.0", ">=1.0.0" + " " * 256),                   # over 256 characters
+    ("1.0.0-99999999999999999999", ">=1.0.0-1"), ("1.0.0-9007199254740991", ">=1.0.0-1"),  # big prerelease numbers
+])
+def test_satisfies_refuses_what_npm_reads_differently(version, rng):
+    with pytest.raises(ValueError):
+        land_check.satisfies(version, rng)
+
+
+def test_satisfies_still_reads_tabs():
+    assert land_check.satisfies("1.5.0", ">=1.0.0\t<2.0.0")

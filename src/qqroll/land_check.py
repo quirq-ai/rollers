@@ -294,12 +294,19 @@ _SNAPSHOT_KEY = re.compile(r"(" + _PKG_NAME + r")@(" + _VERSION + r")(\(.*\))?")
 _RESOLUTION = re.compile(r"\{integrity: (sha512-[A-Za-z0-9+/]+={0,2})\}")
 
 
+# npm's limits: numbers are JavaScript numbers, so only up to Number.MAX_SAFE_INTEGER compare exactly,
+# and versions and ranges are at most 256 characters. Past them npm's answer differs from exact
+# arithmetic, so the check refuses rather than guess which one npm gives.
+MAX_SAFE_INTEGER = 2 ** 53 - 1
+MAX_LENGTH = 256
+
+
 def _prerelease(text):
     """A prerelease's identifiers, ("pre", 1), or None if one is empty or a number with a leading zero."""
     if not text:
         return ()
     ids = text.split(".")
-    if any(not i or (i.isdigit() and len(i) > 1 and i[0] == "0") for i in ids):
+    if any(not i or (i.isdigit() and (len(i) > 1 and i[0] == "0" or int(i) >= MAX_SAFE_INTEGER)) for i in ids):
         return None
     return tuple(int(i) if i.isdigit() else i for i in ids)
 
@@ -309,7 +316,7 @@ def _semver(v):
     m = re.fullmatch(r"v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?",
                      v.strip())
     pre = _prerelease(m[4]) if m else None
-    if pre is None:
+    if pre is None or any(int(m[i]) > MAX_SAFE_INTEGER for i in (1, 2, 3)):
         return None
     return (int(m[1]), int(m[2]), int(m[3])), pre
 
@@ -343,6 +350,8 @@ def _partial(v):
     for part in m.groups()[:3]:
         if part is None or part in "xX*":
             break
+        if int(part) > MAX_SAFE_INTEGER:
+            return None
         nums.append(int(part))
     pre = _prerelease(m[4])
     if pre is None or (pre and len(nums) < 3):
@@ -391,6 +400,12 @@ def _desugar(op, nums, lo):
 def satisfies(version, rng):
     """Whether npm would resolve `rng` to `version`, for the range forms npm documents. Anything else
     (dist-tags, aliases, URLs, git, file:) raises ValueError, so the caller refuses it."""
+    for text in (version, rng):
+        # Python and JavaScript disagree on what counts as whitespace beyond space and tab.
+        # Any number near JavaScript's limit (npm also overflows when it bumps one) is refused too.
+        if len(text) > MAX_LENGTH or not re.fullmatch(r"[\x20-\x7e\t]*", text) or \
+                any(len(d) > 15 and int(d) >= MAX_SAFE_INTEGER for d in re.findall(r"[0-9]+", text)):
+            raise ValueError(f"not a range or version npm reads the same way: {text[:40]!r}")
     v = _semver(version)
     if v is None:
         raise ValueError(f"not a version: {version!r}")
