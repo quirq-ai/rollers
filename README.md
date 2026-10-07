@@ -149,7 +149,7 @@ QQ_TOOLCHAINS=../toolchains QQ_SYNC=../sync python -m pytest -q
 
 | Item | What | PR | State |
 |---|---|---|---|
-| V0-ROL-02 | Lockfile updates (Dependabot config from `rollers.toml`) | #2; delivery xo-space#213 and #219, innernet#38 | merged here, in xo-space and in innernet, with the lockfile tree check (ROL-R6); auto-land stays off until the admin steps above are applied (C-2, C-3) |
-| V0-ROL-01 | Toolchain pin roller | #3 | merged; xo-space and innernet now have manifests with pins; done-when waits on V0-ORG-03 and toolchains enforcing promotion review (auto-merge held off until then) |
+| V0-ROL-02 | Lockfile updates (Dependabot config from `rollers.toml`) | #2; delivery xo-space#213 and #219, innernet#38 | merged here, in xo-space and in innernet, with the lockfile tree check (ROL-R6); auto-land stays off: the land check needs a gate no workflow can fake (a required workflow pinned by sha, or a check bound to a non-Actions app), and required workflows need org rulesets, which quirq-ai's GitHub Free plan does not offer, so only a non-Actions check app could provide it there |
+| V0-ROL-01 | Toolchain pin roller | #3 | merged; xo-space and innernet now have manifests with pins; done-when waits on toolchains enforcing promotion review (gate #25's `promotion-gate`, merged in gate but not applied yet; auto-merge held off until then) |
 
 Plan and every v0 item: `quirq-ai/infra-config`, `docs/plan.md` and `docs/v0.md`.
