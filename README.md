@@ -76,7 +76,7 @@ rolls only move `requirements*.txt` floors, and may open no PR at all (`TODO(exp
 `rollers.toml`); the done-when is shown on innernet first.
 
 Auto-land stays off until all of these hold (ROL-R6 audit): the land check with the tree check is
-delivered to both repos (C-1); the post-v0 settings run has applied the admin steps above, with only
+delivered to both repos (C-1; done: xo-space#219 and innernet#38 carry the current generated files); the post-v0 settings run has applied the admin steps above, with only
 Dependabot exempt from the `dependabot/**` rule (C-2); and the runners reach `registry.npmjs.org`
 (C-3; GitHub-hosted runners do). Notes for that settings run, not built here: give Dependabot a
 `cooldown` (3 to 7 days) or pnpm a `minimumReleaseAge`, since a compromised release is a valid registry
@@ -149,7 +149,7 @@ QQ_TOOLCHAINS=../toolchains QQ_SYNC=../sync python -m pytest -q
 
 | Item | What | PR | State |
 |---|---|---|---|
-| V0-ROL-02 | Lockfile updates (Dependabot config from `rollers.toml`) | #2; delivery xo-space#213, innernet#38 | merged here and in xo-space; innernet#38 waits on innernet's gate; auto-land stays off until the lockfile tree check (ROL-R6) is audited and redelivered |
-| V0-ROL-01 | Toolchain pin roller | #3 | merged; done-when waits on V0-ONB-01 (manifests), V0-ORG-03, and toolchains enforcing promotion review (auto-merge held off until then) |
+| V0-ROL-02 | Lockfile updates (Dependabot config from `rollers.toml`) | #2; delivery xo-space#213 and #219, innernet#38 | merged here, in xo-space and in innernet, with the lockfile tree check (ROL-R6); auto-land stays off until the admin steps above are applied (C-2, C-3) |
+| V0-ROL-01 | Toolchain pin roller | #3 | merged; xo-space and innernet now have manifests with pins; done-when waits on V0-ORG-03 and toolchains enforcing promotion review (auto-merge held off until then) |
 
 Plan and every v0 item: `quirq-ai/infra-config`, `docs/plan.md` and `docs/v0.md`.
